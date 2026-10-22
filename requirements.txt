@@ -1,0 +1,12 @@
+google-genai
+streamlit
+playwright
+pypdf
+python-dotenv
+pillow
+pymupdf
+pythainlp
+# Optional local OCR stack; these packages are large and may need a compatible Python/PyTorch build.
+easyocr
+transformers
+torch
