@@ -1,12 +1,12 @@
-google-genai
 streamlit
-playwright
+google-genai
+websockets<16
 pypdf
-python-dotenv
-pillow
+paddleocr
+paddlepaddle
 pymupdf
-pythainlp
-# Optional local OCR stack; these packages are large and may need a compatible Python/PyTorch build.
-easyocr
-transformers
-torch
+pillow
+pytesseract
+python-docx
+python-dotenv
+requests
