@@ -28,7 +28,7 @@ PSM_VALUES = ["6", "3", "4"]
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 PDF_VIEWER_HTML = Path(__file__).resolve().parent / "pdf-viewer.html"
 PDF_VIEWER_APP_JS = Path(__file__).resolve().parent / "pdf-viewer-app.js"
 
