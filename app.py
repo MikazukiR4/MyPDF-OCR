@@ -33,8 +33,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 PDF_VIEWER_HTML = Path(__file__).resolve().parent / "embedpdf-viewer.html"
 
 
-def render_page(pdf_bytes: bytes, page_number: int) -> bytes:
-    """Render one PDF page to a high-DPI PNG (~300 DPI) so Thai diacritics stay crisp."""
+def render_page(pdf_bytes: bytes, page_number: int, mode: str = "best") -> bytes:
+    """Render one PDF page to a PNG, balancing OCR quality and speed."""
     try:
         import pymupdf as fitz
     except ImportError:
@@ -44,7 +44,9 @@ def render_page(pdf_bytes: bytes, page_number: int) -> bytes:
     try:
         page = document[page_number - 1]
         width = max(1, page.rect.width)
-        scale = min(4.2, max(2.5, 2400 / width))
+        target_width = 1800 if mode == "fast" else 2400
+        minimum_scale = 1.8 if mode == "fast" else 2.5
+        scale = min(4.2, max(minimum_scale, target_width / width))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         return pixmap.tobytes("png")
     finally:
@@ -530,7 +532,7 @@ def extract_pdf(
                     method = "embedded PDF text"
                     if use_gemini_correction:
                         try:
-                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number), text, gemini_model)
+                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number, mode), text, gemini_model)
                             text = corrected
                             method = "Gemini corrected"
                         except Exception as exc:
@@ -539,7 +541,7 @@ def extract_pdf(
                     ratio = page_number / page_count
                     progress.progress(ratio, text=f"อ่านข้อความฝังหน้า {page_number}/{page_count} เสร็จแล้ว")
                     continue
-                image_bytes = render_page(pdf_bytes, page_number)
+                image_bytes = render_page(pdf_bytes, page_number, mode)
                 try:
                     text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
                     text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
@@ -810,7 +812,7 @@ with st.sidebar:
     else:
         st.error("ไม่พบ Tesseract")
     if use_gemini_correction:
-        st.warning("Gemini จะตรวจทีละหน้า โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
+        st.warning("Gemini จะตรวจทีละหน้าและอาจใช้เวลานาน โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
     elif not gemini_key_available:
         st.info("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ปิดการตรวจแก้ Gemini ไว้ และจะอ่านเอกสารด้วย OCR ตามปกติ")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
