@@ -1292,7 +1292,6 @@ if uploaded is not None:
         current_result,
         height=420,
         label_visibility="visible",
-        key="ocr-preview",
     )
 
 if run:
@@ -1306,13 +1305,15 @@ if run:
         "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
         height=680,
         label_visibility="visible",
-        key="ocr-live-initial",
     )
 
     def publish_live_text(text: str) -> None:
-        # Update the existing placeholder without creating another text_area
-        # widget on every OCR page/callback.
-        live_output.text(text)
+        live_output.text_area(
+            "ตัวอย่างผลระหว่างประมวลผล",
+            text,
+            height=680,
+            label_visibility="visible",
+        )
 
     try:
         text, errors, failed_images = extract_pdf(
@@ -1327,7 +1328,6 @@ if run:
             text,
             height=680,
             label_visibility="visible",
-            key="ocr-final",
         )
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
