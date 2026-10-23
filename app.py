@@ -1308,13 +1308,19 @@ if run:
         "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
         height=680,
         label_visibility="visible",
-        key="ocr-live-initial",
+        key="ocr-live",
     )
 
     def publish_live_text(text: str) -> None:
-        # Update the existing placeholder without creating another text_area
-        # widget on every OCR page/callback.
-        live_output.text(text)
+        # Keep the live OCR result inside a scrollable textbox while replacing
+        # the content in the same placeholder.
+        live_output.text_area(
+            "ตัวอย่างผลระหว่างประมวลผล",
+            text,
+            height=680,
+            label_visibility="visible",
+            key="ocr-live",
+        )
 
     try:
         text, errors, failed_images = extract_pdf(
