@@ -1291,16 +1291,6 @@ if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != pre
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
-if uploaded is not None:
-    st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
-    if uploaded_fingerprint != st.session_state.get("ocr_result_fingerprint"):
-        st.info("ยังไม่มีผล OCR สำหรับไฟล์นี้ กด “เริ่มอ่านเอกสาร” เพื่อประมวลผล")
-else:
-    st.info("เลือกไฟล์ PDF เพื่อเริ่มต้น")
-if uploaded is not None and use_gemini_correction:
-    st.info("ความเป็นส่วนตัว: PDF ทั้งเอกสารและข้อความ OCR จะถูกส่งไปยัง Google Gemini เพื่อช่วยตรวจแก้")
-elif uploaded is not None and engine == "typhoon":
-    st.info("ความเป็นส่วนตัว: ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 
 if uploaded is not None:
