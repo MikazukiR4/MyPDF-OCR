@@ -291,11 +291,10 @@ def gemini_model_option_label(model_name: str) -> str:
     """Show the model's quick comparison scale directly in the dropdown options."""
     profile = gemini_model_profile(model_name)
     return (
-        f"{model_name} | "
-        f"คุณภาพ {star_scale(profile['quality'])} · "
-        f"เร็ว {star_scale(profile['speed'])} · "
-        f"ภาพ {star_scale(profile['vision'])} · "
-        f"ประหยัด {star_scale(profile['economy'])}"
+        f"{model_name} | Q {star_scale(profile['quality'])} · "
+        f"S {star_scale(profile['speed'])} · "
+        f"V {star_scale(profile['vision'])} · "
+        f"E {star_scale(profile['economy'])}"
     )
 
 
@@ -653,7 +652,11 @@ def inject_css() -> None:
         div[data-testid="stProgressBar"] > div { background:#1e293b !important; }
         [data-baseweb="select"], [data-baseweb="select"] > div { background:#0f172a !important; border-color:#475569 !important; color:#f8fafc !important; }
         [data-baseweb="select"] * { color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; }
-        [role="listbox"], [role="option"] { background:#111827 !important; color:#f8fafc !important; }
+        [role="listbox"] { background:#111827 !important; color:#f8fafc !important; min-width:520px !important; width:max-content !important; max-width:90vw !important; }
+        [role="option"] { background:#111827 !important; color:#f8fafc !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; min-height:42px !important; line-height:1.35 !important; padding:8px 12px !important; }
+        [role="option"]:hover { background:#1e3a5f !important; }
+        aside[data-testid="stSidebar"] [data-baseweb="select"] { min-width:100% !important; }
+        aside[data-testid="stSidebar"] [data-baseweb="select"] > div { min-width:100% !important; }
         div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
         aside[data-testid="stSidebar"] { background:#111827 !important; }
         .gemini-rating-row { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:help; }
@@ -756,6 +759,19 @@ with st.sidebar:
                 st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
                 st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
                 st.caption(f"ตรวจพบ {len(available_gemini_models)} โมเดลที่ใช้ generateContent ได้")
+                comparison_rows = []
+                for model_info in available_gemini_models:
+                    model_name = str(model_info["name"])
+                    model_profile = gemini_model_profile(model_name)
+                    comparison_rows.append({
+                        "โมเดล": model_name,
+                        "คุณภาพ": star_scale(model_profile["quality"]),
+                        "เร็ว": star_scale(model_profile["speed"]),
+                        "ภาพ/PDF": star_scale(model_profile["vision"]),
+                        "ประหยัด": star_scale(model_profile["economy"]),
+                    })
+                with st.expander("ดูตารางเปรียบเทียบโมเดลทั้งหมด", expanded=False):
+                    st.table(comparison_rows)
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
         except Exception as exc:
