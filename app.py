@@ -25,7 +25,7 @@ TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 
 OEM_LSTM_ONLY = "1"
 
-PSM_VALUES = ["6", "3", "4"]
+PSM_VALUES = ["3", "6", "4"]
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
@@ -664,7 +664,8 @@ with st.sidebar:
     )
     language = st.selectbox(
         "ภาษา",
-        ["tha", "tha+eng", "eng"],
+        ["tha+eng", "tha", "eng"],
+        index=0,
         format_func=lambda value: {"tha": "ไทย", "tha+eng": "ไทย + อังกฤษ", "eng": "อังกฤษ"}[value],
     )
     mode = st.selectbox(
