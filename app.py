@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -84,8 +85,22 @@ def clean_thai_ocr_text(text: str) -> str:
     """Normalize Thai text and remove common floating-diacritic OCR garbage."""
     if not text:
         return ""
+    # Some Thai PDF fonts expose tone marks through Private Use Area glyphs.
+    # Convert only the mappings observed in the embedded text layer so that
+    # normal Unicode text is left unchanged.
+    text = text.translate(str.maketrans({
+        "\uf70a": "\u0e48",  # mai ek: ่
+        "\uf70b": "\u0e49",  # mai tho: ้
+        "\uf70e": "\u0e4c",  # thanthakhat: ์
+    }))
+    text = unicodedata.normalize("NFC", text)
     text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
     text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "ำ\\1", text)
+    # A few legacy Thai fonts place a tone mark before a below vowel
+    # (for example ผู้). Put the tone mark after the vowel (ผู้).
+    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
+    text = re.sub(r"<file_content\b[^>]*>.*?</file_content>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<file_content\b[^>]*>.*$", "", text, flags=re.DOTALL)
 
     output = []
     for line in text.splitlines():
@@ -137,7 +152,7 @@ def embedded_pdf_text(page: object) -> str:
         return ""
     raw = re.sub(r"[ \t]+", " ", raw)
     raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return raw.strip()
+    return clean_thai_ocr_text(raw.strip())
 
 
 def typhoon_api_key() -> str:
