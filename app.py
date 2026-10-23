@@ -28,6 +28,7 @@ PSM_VALUES = ["6", "3", "4"]
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 PDF_VIEWER_HTML = Path(__file__).resolve().parent / "pdf-viewer.html"
 PDF_VIEWER_APP_JS = Path(__file__).resolve().parent / "pdf-viewer-app.js"
 
@@ -175,6 +176,60 @@ def typhoon_transcribe(image_bytes: bytes) -> str:
         raise RuntimeError("Typhoon OCR ไม่ส่งข้อความกลับมา") from exc
 
 
+def gemini_api_key() -> str:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+
+
+def gemini_correct_text(image_bytes: bytes, source_text: str) -> str:
+    """Correct Thai PDF text using the page image as the source of truth."""
+    api_key = gemini_api_key()
+    if not api_key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    prompt = (
+        "คุณเป็นระบบตรวจแก้ข้อความ OCR ภาษาไทยจากเอกสารราชการ\n"
+        "อ่านข้อความจากภาพต้นฉบับเป็นหลัก และใช้ข้อความ OCR ด้านล่างเป็นเพียงตัวช่วย\n"
+        "แก้เฉพาะสระ วรรณยุกต์ การแยกคำ ช่องว่าง และอักขระที่อ่านผิดจาก PDF font mapping\n"
+        "ห้ามสรุป ห้ามตัดข้อความ ห้ามเพิ่มข้อความ และห้ามเปลี่ยนเลขไทย วันที่ เลขที่หนังสือ หรือสาระสำคัญ\n"
+        "รักษาการขึ้นบรรทัดใหม่ให้ใกล้เคียงต้นฉบับ หากไม่แน่ใจให้คงข้อความเดิมไว้\n"
+        "ส่งคืนเฉพาะข้อความที่แก้แล้ว ห้ามใส่ Markdown ห้ามใส่คำอธิบาย\n\n"
+        "ข้อความ OCR เดิม:\n"
+        f"{source_text}"
+    )
+    payload = {
+        "contents": [{"parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
+        ]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
+    }
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        corrected = "\n".join(
+            part["text"]
+            for part in result["candidates"][0]["content"]["parts"]
+            if part.get("text")
+        ).strip()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"เชื่อมต่อ Gemini ไม่สำเร็จ: {exc.reason}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Gemini ไม่ส่งข้อความกลับมา") from exc
+
+    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
+        raise RuntimeError("Gemini ส่งข้อความแก้ไขกลับมาสั้นผิดปกติ จึงคงข้อความเดิมไว้")
+    return clean_thai_ocr_text(corrected)
+
+
 
 
 def tesseract_path() -> str | None:
@@ -283,6 +338,7 @@ def extract_pdf(
     psm: str,
     oem: str,
     engine: str,
+    use_gemini_correction: bool,
     progress: object,
 ) -> tuple[str, list[tuple[int, str]], dict[int, bytes]]:
     try:
@@ -314,14 +370,31 @@ def extract_pdf(
                 # Born-digital PDFs already contain selectable text. Prefer it
                 # over image OCR to avoid corrupting Thai text and wasting API calls.
                 if len(embedded) >= 80:
-                    output.append(f"----- หน้า {page_number} | embedded PDF text -----\n{embedded}")
+                    text = embedded
+                    method = "embedded PDF text"
+                    if use_gemini_correction:
+                        try:
+                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number), text)
+                            text = corrected
+                            method = "Gemini corrected"
+                        except Exception as exc:
+                            errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {exc}"))
+                    output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
                     ratio = page_number / page_count
                     progress.progress(ratio, text=f"อ่านข้อความฝังหน้า {page_number}/{page_count} เสร็จแล้ว")
                     continue
                 image_bytes = render_page(pdf_bytes, page_number)
                 try:
                     text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
-                    output.append(f"----- หน้า {page_number} -----\n{text or embedded_pdf_text(document[page_number - 1]) or '[ไม่พบข้อความ]'}")
+                    text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
+                    method = engine
+                    if use_gemini_correction and text and not text.startswith("["):
+                        try:
+                            text = gemini_correct_text(image_bytes, text)
+                            method = "Gemini corrected"
+                        except Exception as correction_error:
+                            errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
+                    output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
                 except Exception as exc:
                     fallback = embedded_pdf_text(document[page_number - 1])
                     if fallback:
@@ -488,6 +561,11 @@ with st.sidebar:
         format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "บล็อกข้อความ / ตาราง", "4": "คอลัมน์เดียว"}[value],
     )
     oem = OEM_LSTM_ONLY
+    use_gemini_correction = st.checkbox(
+        "ให้ Gemini ตรวจแก้สระ/วรรณยุกต์จากภาพต้นฉบับ",
+        value=False,
+        help="ใช้ข้อความเดิมร่วมกับภาพ PDF เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ โดยไม่สรุปหรือเพิ่มเนื้อหา",
+    )
     if engine == "typhoon":
         if typhoon_api_key():
             st.success("พร้อมใช้ Typhoon OCR")
@@ -498,6 +576,11 @@ with st.sidebar:
         st.success("พร้อมใช้ Tesseract ในเครื่อง")
     else:
         st.error("ไม่พบ Tesseract")
+    if use_gemini_correction:
+        if gemini_api_key():
+            st.warning("Gemini จะถูกเรียกทีละหน้าและอาจใช้โควตา API")
+        else:
+            st.error("ไม่พบ GEMINI_API_KEY")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
 st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
@@ -521,7 +604,8 @@ if run:
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
     try:
         text, errors, failed_images = extract_pdf(
-            uploaded.getvalue(), language, mode, psm, oem, engine, progress,
+            uploaded.getvalue(), language, mode, psm, oem, engine,
+            use_gemini_correction, progress,
         )
         progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
         st.success("อ่านเอกสารสำเร็จ")
