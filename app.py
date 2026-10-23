@@ -556,14 +556,26 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Embed the EmbedPDF viewer used by the Office-attendance project."""
+    """Embed the local EmbedPDF viewer in a JavaScript-capable iframe.
+
+    ``components.html`` is deprecated by Streamlit, but it remains necessary
+    here because EmbedPDF uses an ES module and must run in an isolated iframe.
+    ``st.html`` is not an equivalent replacement: it is not iframed and its
+    default behavior ignores JavaScript. Keep the viewer HTML static and inject
+    only the PDF bytes produced from the current upload.
+    """
     if not PDF_VIEWER_HTML.exists():
         st.error("ไม่พบไฟล์ PDF viewer ในโปรเจกต์")
+        return
+    if not pdf_bytes:
+        st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
     viewer = PDF_VIEWER_HTML.read_text(encoding="utf-8")
     encoded = base64.b64encode(pdf_bytes).decode("ascii")
     config = json.dumps({"data": encoded}).replace("<", "\\u003c")
     viewer = viewer.replace("<head>", f'<head><script>window.__THSUMMARIZER_PDF__={config};</script>', 1)
+    # The viewer contains trusted, repository-owned HTML and is required to
+    # execute EmbedPDF's browser-side JavaScript module.
     components.html(viewer, height=height, scrolling=True)
 
 def inject_css() -> None:

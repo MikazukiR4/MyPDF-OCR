@@ -4,6 +4,3 @@ services:
     runtime: docker
     plan: free
     region: singapore
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.13.5
