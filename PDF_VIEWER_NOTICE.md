@@ -1,24 +1,16 @@
-# PDF viewer third-party notices
+# PDF viewer implementation note
 
-This project includes the EmbedPDF viewer integration based on:
+MyOCR PDF uses Streamlit's built-in `st.pdf` element for the uploaded PDF.
+The `streamlit[pdf]` extra is required because it installs the `streamlit-pdf`
+component used by that element.
+The application passes the original PDF bytes directly to Streamlit instead of
+embedding them in nested `data:` URLs or loading a third-party JavaScript CDN.
+This avoids browser iframe size limits and external-script failures in deployed
+environments.
 
-https://github.com/embedpdf/embed-pdf-viewer
+The UI always includes a direct PDF download button as a fallback. If the
+browser cannot display the embedded PDF, users can open the downloaded file in
+their normal PDF reader without uploading it again.
 
-The browser module is loaded from the jsDelivr package:
-
-https://cdn.jsdelivr.net/npm/@embedpdf/snippet@2/dist/embedpdf.js
-
-The integration creates a temporary browser object URL from the selected PDF
-bytes and passes it to EmbedPDF. The PDF is not uploaded a second time by the
-viewer integration.
-
-## Streamlit iframe note
-
-The integration intentionally uses `st.components.v1.html` because the viewer
-contains an ES module and must execute inside an iframe. Streamlit currently
-marks this API as deprecated, but `st.html` is not a drop-in replacement: it is
-not iframed and JavaScript is disabled unless explicitly enabled. Revisit this
-when Streamlit provides an iframe-capable replacement that supports the viewer.
-
-The viewer HTML is repository-owned. Only the uploaded PDF bytes are injected
-into its configuration; user-provided text is not treated as HTML or script.
+The legacy EmbedPDF assets remain in the repository for reference, but they are
+not part of the active viewer path.
