@@ -26,6 +26,7 @@ load_dotenv(".env.typhoon", override=False)
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_PAGES = 100
 GEMINI_MAX_WORKERS = 3
+OCR_MAX_WORKERS = max(1, int(os.getenv("OCR_MAX_WORKERS", "3")))
 TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 
 OEM_LSTM_ONLY = "1"
@@ -918,65 +919,82 @@ def extract_pdf(
                 page_callback("\n\n".join(output))
 
         try:
-            # Process small batches so Gemini calls overlap while completed
-            # pages are still published incrementally in document order.
-            batch_size = GEMINI_MAX_WORKERS if use_gemini_correction and not gemini_document_mode else 1
+            # Render pages in the main thread because a PyMuPDF document should
+            # not be shared between worker threads. OCR itself is independent
+            # per page, so bounded parallelism significantly reduces total time
+            # without changing output order or line breaks.
+            batch_size = max(1, OCR_MAX_WORKERS)
             for batch_start in range(1, page_count + 1, batch_size):
                 batch_end = min(page_count, batch_start + batch_size - 1)
-                page_data: dict[int, tuple[str, str, bytes | None]] = {}
-                gemini_jobs: dict[int, tuple[bytes, str]] = {}
+                page_images: dict[int, bytes] = {}
                 for page_number in range(batch_start, batch_end + 1):
                     ratio = (page_number - 1) / page_count
                     progress.progress(ratio * 0.5, text=f"กำลังเตรียมหน้า {page_number}/{page_count}")
-                    page = document[page_number - 1]
-                    image_bytes = render_page(document, page_number, mode)
-                    try:
-                        text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
-                        if not text:
-                            raise RuntimeError("OCR engine ส่งข้อความว่างกลับมา")
-                        page_data[page_number] = (text, engine, image_bytes)
-                        if use_gemini_correction and not gemini_document_mode and text and not text.startswith("["):
-                            gemini_jobs[page_number] = (image_bytes, text)
-                    except Exception as exc:
-                        errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-                        failed_images[page_number] = image_bytes
+                    page_images[page_number] = render_page(document, page_number, mode)
 
-                futures = {}
+                def recognize_page(page_number: int) -> tuple[int, str, str, bytes]:
+                    image_bytes = page_images[page_number]
+                    text = (
+                        typhoon_transcribe(image_bytes)
+                        if engine == "typhoon"
+                        else worker.recognize(image_bytes)
+                    )
+                    if not text:
+                        raise RuntimeError("OCR engine ส่งข้อความว่างกลับมา")
+                    return page_number, text, engine, image_bytes
+
+                page_data: dict[int, tuple[str, str, bytes | None]] = {}
+                with ThreadPoolExecutor(max_workers=min(OCR_MAX_WORKERS, len(page_images))) as executor:
+                    futures = {
+                        page_number: executor.submit(recognize_page, page_number)
+                        for page_number in page_images
+                    }
+                    for page_number in range(batch_start, batch_end + 1):
+                        try:
+                            _, text, method, image_bytes = futures[page_number].result()
+                            page_data[page_number] = (text, method, image_bytes)
+                        except Exception as exc:
+                            errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+                            failed_images[page_number] = page_images[page_number]
+
+                gemini_jobs = {
+                    page_number: (image_bytes, text)
+                    for page_number, (text, _, image_bytes) in page_data.items()
+                    if use_gemini_correction
+                    and not gemini_document_mode
+                    and image_bytes is not None
+                    and text
+                    and not text.startswith("[")
+                }
+                gemini_futures = {}
                 if gemini_jobs:
                     with ThreadPoolExecutor(max_workers=min(GEMINI_MAX_WORKERS, len(gemini_jobs))) as executor:
-                        for page_number, (image_bytes, source_text) in gemini_jobs.items():
-                            futures[page_number] = executor.submit(
+                        gemini_futures = {
+                            page_number: executor.submit(
                                 gemini_correct_text, image_bytes, source_text, gemini_model
                             )
+                            for page_number, (image_bytes, source_text) in gemini_jobs.items()
+                        }
                         for page_number in range(batch_start, batch_end + 1):
-                            if page_number not in page_data:
-                                output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
-                            else:
-                                text, method, _ = page_data[page_number]
-                                if page_number in futures:
-                                    try:
-                                        text = futures[page_number].result()
-                                        method = "Gemini corrected"
-                                    except Exception as correction_error:
-                                        errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
-                                output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
-                            progress.progress(
-                                0.5 + (page_number / page_count) * 0.5,
-                                text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
-                            )
-                            publish_page()
-                else:
-                    for page_number in range(batch_start, batch_end + 1):
-                        if page_number not in page_data:
-                            output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
-                        else:
-                            text, method, _ = page_data[page_number]
-                            output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
-                        progress.progress(
-                            0.5 + (page_number / page_count) * 0.5,
-                            text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
-                        )
-                        publish_page()
+                            if page_number in gemini_futures:
+                                try:
+                                    corrected_text = gemini_futures[page_number].result()
+                                    _, _, image_bytes = page_data[page_number]
+                                    page_data[page_number] = (corrected_text, "Gemini corrected", image_bytes)
+                                except Exception as correction_error:
+                                    errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
+
+                for page_number in range(batch_start, batch_end + 1):
+                    if page_number not in page_data:
+                        output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                    else:
+                        text, method, _ = page_data[page_number]
+                        output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                    progress.progress(
+                        0.5 + (page_number / page_count) * 0.5,
+                        text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
+                    )
+                    publish_page()
         finally:
             if worker is not None:
                 worker.terminate()
