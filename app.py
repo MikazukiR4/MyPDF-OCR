@@ -1312,13 +1312,6 @@ if run:
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
-        st.text_area(
-            "ผล OCR",
-            text,
-            height=680,
-            label_visibility="visible",
-            key="ocr-final",
-        )
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if use_gemini_correction and document_errors:
@@ -1372,3 +1365,16 @@ if run:
         st.session_state["ocr_status"] = "failed"
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
+
+if (
+    uploaded is not None
+    and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
+    and st.session_state.get("ocr_text")
+):
+    st.text_area(
+        "ผล OCR",
+        st.session_state["ocr_text"],
+        height=680,
+        label_visibility="visible",
+        key="ocr-final",
+    )
