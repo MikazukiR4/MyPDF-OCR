@@ -1,5 +1,6 @@
 import io
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -14,7 +15,6 @@ import urllib.request
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 
@@ -36,29 +36,25 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 PDF_VIEWER_HTML = Path(__file__).resolve().parent / "embedpdf-viewer.html"
 
 
-def render_page(pdf_bytes: bytes, page_number: int, mode: str = "best") -> bytes:
-    """Render one PDF page to a PNG, balancing OCR quality and speed."""
+def render_page(document: object, page_number: int, mode: str = "best") -> bytes:
+    """Render one page from an open PyMuPDF document to PNG."""
     try:
         import pymupdf as fitz
     except ImportError:
         import fitz
 
-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        page = document[page_number - 1]
-        if mode == "fast":
-            # 150 DPI is sufficient for the fast OCR path and avoids rendering
-            # unnecessarily large images before preprocessing.
-            pixmap = page.get_pixmap(dpi=150, alpha=False)
-            return pixmap.tobytes("png")
-        width = max(1, page.rect.width)
-        target_width = 2400
-        minimum_scale = 2.5
-        scale = min(4.2, max(minimum_scale, target_width / width))
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+    page = document[page_number - 1]
+    if mode == "fast":
+        # 150 DPI is sufficient for the fast OCR path and avoids rendering
+        # unnecessarily large images before preprocessing.
+        pixmap = page.get_pixmap(dpi=150, alpha=False)
         return pixmap.tobytes("png")
-    finally:
-        document.close()
+    width = max(1, page.rect.width)
+    target_width = 2400
+    minimum_scale = 2.5
+    scale = min(4.2, max(minimum_scale, target_width / width))
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+    return pixmap.tobytes("png")
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
@@ -409,6 +405,95 @@ def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str
     return clean_thai_ocr_text(corrected)
 
 
+def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> str:
+    """Correct a PDF using Gemini's native document understanding.
+
+    Sending the original PDF lets Gemini use its embedded text and page
+    layout instead of requiring one rendered PNG request per page. The local
+    OCR text is retained as a reference for characters that are difficult to
+    read from the document alone.
+    """
+    api_key = gemini_api_key()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+
+    prompt = (
+        "You are correcting Thai OCR from an official document. Read the PDF "
+        "itself as the primary source, including its native text, layout, and "
+        "visual content. Use the supplied OCR only as a secondary reference. "
+        "Correct spelling, Thai vowels, tone marks, spacing, and PDF font "
+        "mapping errors without summarizing or adding text. Preserve every "
+        "page marker and return the corrected text in the same page order. "
+        "Return only the corrected document text.\n\n"
+        "LOCAL OCR REFERENCE:\n"
+        f"{source_text}"
+    )
+    payload = {
+        "contents": [{"parts": [
+            {"text": prompt},
+            {"inline_data": {
+                "mime_type": "application/pdf",
+                "data": base64.b64encode(pdf_bytes).decode("ascii"),
+            }},
+        ]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 32768},
+    }
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        corrected = "\n".join(
+            part["text"]
+            for part in result["candidates"][0]["content"]["parts"]
+            if part.get("text")
+        ).strip()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini document HTTP {exc.code}: {detail[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Gemini document connection failed: {exc.reason}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Gemini returned no document text") from exc
+
+    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
+        raise RuntimeError("Gemini document correction returned unexpectedly short text")
+    validate_document_markers(source_text, corrected)
+    return clean_thai_ocr_text(corrected)
+
+
+PAGE_MARKER_RE = re.compile(r"^----- หน้า ([0-9]+)(?: \| .*?)? -----$", re.MULTILINE)
+
+
+def document_page_markers(text: str) -> list[int]:
+    """Extract ordered page markers from a document OCR result."""
+    return [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(text or "")]
+
+
+def validate_document_markers(source_text: str, corrected_text: str) -> None:
+    """Reject Gemini output that loses, duplicates, or reorders page markers."""
+    expected = document_page_markers(source_text)
+    actual = document_page_markers(corrected_text)
+    if not expected:
+        raise RuntimeError("Local OCR output has no page markers to validate")
+    if actual != expected:
+        missing = [page for page in expected if page not in actual]
+        unexpected = [page for page in actual if page not in expected]
+        details = []
+        if missing:
+            details.append(f"หน้าที่หาย: {', '.join(map(str, missing[:10]))}")
+        if unexpected:
+            details.append(f"หน้าที่เกิน/ซ้ำ: {', '.join(map(str, unexpected[:10]))}")
+        if not details:
+            details.append("ลำดับ marker ไม่ตรงกับเอกสารต้นฉบับ")
+        raise RuntimeError("Gemini ส่ง marker หน้าไม่ครบหรือเรียงลำดับผิด: " + "; ".join(details))
+
+
 
 
 def tesseract_path() -> str | None:
@@ -521,7 +606,7 @@ def extract_pdf(
     gemini_model: str,
     progress: object,
     page_callback: object | None = None,
-) -> tuple[str, list[tuple[int, str]], dict[int, bytes]]:
+) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
     try:
         import pymupdf as fitz
     except ImportError:
@@ -540,9 +625,10 @@ def extract_pdf(
             raise ValueError(f"เอกสารมี {page_count} หน้า เกินขีดจำกัด {MAX_PAGES} หน้า")
 
         output: list[str] = []
-        errors: list[tuple[int, str]] = []
+        errors: list[tuple[int | None, str]] = []
         failed_images: dict[int, bytes] = {}
         worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
+        gemini_document_mode = use_gemini_correction and len(pdf_bytes) <= MAX_FILE_BYTES
 
         def publish_page() -> None:
             if page_callback is not None:
@@ -551,7 +637,7 @@ def extract_pdf(
         try:
             # Process small batches so Gemini calls overlap while completed
             # pages are still published incrementally in document order.
-            batch_size = GEMINI_MAX_WORKERS if use_gemini_correction else 1
+            batch_size = GEMINI_MAX_WORKERS if use_gemini_correction and not gemini_document_mode else 1
             for batch_start in range(1, page_count + 1, batch_size):
                 batch_end = min(page_count, batch_start + batch_size - 1)
                 page_data: dict[int, tuple[str, str, bytes | None]] = {}
@@ -565,17 +651,17 @@ def extract_pdf(
                     # over image OCR to avoid corrupting Thai text and wasting API calls.
                     if len(embedded) >= 80:
                         text = embedded
-                        image_bytes = render_page(pdf_bytes, page_number, mode) if use_gemini_correction else None
+                        image_bytes = render_page(document, page_number, mode) if use_gemini_correction and not gemini_document_mode else None
                         page_data[page_number] = (text, "embedded PDF text", image_bytes)
-                        if image_bytes is not None:
+                        if image_bytes is not None and not gemini_document_mode:
                             gemini_jobs[page_number] = (image_bytes, text)
                         continue
-                    image_bytes = render_page(pdf_bytes, page_number, mode)
+                    image_bytes = render_page(document, page_number, mode)
                     try:
                         text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
                         text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
                         page_data[page_number] = (text, engine, image_bytes)
-                        if use_gemini_correction and text and not text.startswith("["):
+                        if use_gemini_correction and not gemini_document_mode and text and not text.startswith("["):
                             gemini_jobs[page_number] = (image_bytes, text)
                     except Exception as exc:
                         fallback = embedded_pdf_text(document[page_number - 1])
@@ -624,33 +710,57 @@ def extract_pdf(
         finally:
             if worker is not None:
                 worker.terminate()
-        return "\n\n".join(output), errors, failed_images
+
+        local_output = "\n\n".join(output)
+        if gemini_document_mode and local_output:
+            progress.progress(0.85, text="กำลังส่ง PDF ทั้งเอกสารให้ Gemini ตรวจแก้")
+            try:
+                corrected_document = gemini_correct_document(pdf_bytes, local_output, gemini_model)
+                progress.progress(0.98, text="ตรวจสอบลำดับและ marker หน้าแล้ว")
+                return corrected_document, errors, failed_images
+            except Exception as correction_error:
+                errors.append((None, f"Gemini ตรวจแก้ทั้งเอกสารไม่สำเร็จ: {correction_error}"))
+        return local_output, errors, failed_images
     finally:
         document.close()
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Embed the local EmbedPDF viewer in a JavaScript-capable iframe.
+    """Show the uploaded PDF in the browser's native PDF viewer.
 
-    ``components.html`` is deprecated by Streamlit, but it remains necessary
-    here because EmbedPDF uses an ES module and must run in an isolated iframe.
-    ``st.html`` is not an equivalent replacement: it is not iframed and its
-    default behavior ignores JavaScript. Keep the viewer HTML static and inject
-    only the PDF bytes produced from the current upload.
+    The native viewer is deliberately used here instead of depending on a
+    third-party JavaScript CDN inside Streamlit's sandboxed iframe. It keeps
+    the PDF preview available when external scripts are blocked or offline.
     """
-    if not PDF_VIEWER_HTML.exists():
-        st.error("ไม่พบไฟล์ PDF viewer ในโปรเจกต์")
-        return
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
-    viewer = PDF_VIEWER_HTML.read_text(encoding="utf-8")
     encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    config = json.dumps({"data": encoded}).replace("<", "\\u003c")
-    viewer = viewer.replace("<head>", f'<head><script>window.__THSUMMARIZER_PDF__={config};</script>', 1)
-    # The viewer contains trusted, repository-owned HTML and is required to
-    # execute EmbedPDF's browser-side JavaScript module.
-    components.html(viewer, height=height, scrolling=True)
+    safe_filename = json.dumps(filename or "document.pdf", ensure_ascii=False)
+    viewer = f"""
+    <!doctype html>
+    <html lang="th">
+      <head>
+        <meta charset="utf-8">
+        <title>PDF preview</title>
+        <style>
+          html, body {{ margin: 0; width: 100%; height: 100%; background: #172554; }}
+          embed {{ display: block; width: 100%; height: 100%; border: 0; }}
+          .fallback {{ padding: 1rem; color: #e2e8f0; font: 14px sans-serif; }}
+          .fallback a {{ color: #93c5fd; }}
+        </style>
+      </head>
+      <body>
+        <embed src="data:application/pdf;base64,{encoded}" type="application/pdf" title={safe_filename}>
+        <div class="fallback">
+          เบราว์เซอร์ไม่รองรับการแสดง PDF ในหน้านี้
+          <a download={safe_filename} href="data:application/pdf;base64,{encoded}">ดาวน์โหลด {safe_filename}</a>
+        </div>
+      </body>
+    </html>
+    """
+    iframe_src = "data:text/html;base64," + base64.b64encode(viewer.encode("utf-8")).decode("ascii")
+    st.iframe(iframe_src, height=height, alt=f"ตัวอย่าง PDF: {filename or 'document.pdf'}")
 
 def inject_css() -> None:
     st.markdown(
@@ -668,6 +778,9 @@ def inject_css() -> None:
         .mypdf-name span { color:var(--accent); }
         .ocr-card { background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:24px; box-shadow:0 5px 20px rgba(15,23,42,.06); }
         .subtitle { color:var(--muted) !important; margin-top:-12px; margin-bottom:24px; font-size:15px; }
+        .workflow-steps { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:-8px 0 24px; color:#64748b; font-size:14px; }
+        .workflow-step { padding:6px 10px; border:1px solid #cbd5e1; border-radius:999px; background:#fff; }
+        .workflow-step.active { color:#991b1b; border-color:#fca5a5; background:#fef2f2; font-weight:700; }
         div[data-testid="stFileUploader"] { background:#ffffff !important; border:2px dashed #94a3b8; border-radius:14px; padding:10px; }
         div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#ffffff !important; color:#172033 !important; }
         div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#334155 !important; }
@@ -721,6 +834,16 @@ def inject_css() -> None:
         .gemini-rating-label { min-width:145px; color:#e5e7eb; font-size:0.88rem; }
         .gemini-rating-stars { color:#fbbf24; letter-spacing:1px; font-size:1rem; }
         .gemini-rating-help { color:#94a3b8; font-size:0.78rem; }
+        @media (max-width: 700px) {
+            .block-container { padding-left:1rem; padding-right:1rem; padding-top:2.5rem; }
+            .mypdf-header { margin-bottom:1.25rem; }
+            .mypdf-name { font-size:25px; }
+            .workflow-steps { gap:5px; font-size:12px; }
+            .workflow-steps > span:not(.workflow-step) { display:none; }
+            .workflow-step { padding:5px 7px; }
+            .ocr-card { padding:16px; }
+            div[data-testid="stTextArea"] textarea { font-size:15px !important; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -736,6 +859,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown('<div class="subtitle">อ่านข้อความจาก PDF สแกน — ภาษาไทยและภาษาอังกฤษ</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="workflow-steps" aria-label="ขั้นตอนการใช้งาน">'
+    '<span class="workflow-step active">① เลือกไฟล์</span><span>→</span>'
+    '<span class="workflow-step">② อ่านเอกสาร</span><span>→</span>'
+    '<span class="workflow-step">③ ตรวจผล</span><span>→</span>'
+    '<span class="workflow-step">④ ดาวน์โหลด</span></div>',
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
@@ -850,7 +981,7 @@ with st.sidebar:
                 )
                 st.info(f"เหมาะกับ: {profile['best_for']}")
                 st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
-                st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
+                st.caption("PDF: เมื่อเริ่มตรวจแก้ ระบบจะส่ง PDF ต้นฉบับและข้อความ OCR ทั้งเอกสารไปยังโมเดลที่เลือกในคำขอเดียว")
                 st.caption(f"แสดง {len(selectable_models)} จาก {len(available_gemini_models)} โมเดลที่ใช้ได้")
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
@@ -868,7 +999,7 @@ with st.sidebar:
     else:
         st.error("ไม่พบ Tesseract")
     if use_gemini_correction:
-        st.warning("Gemini จะตรวจทีละหน้าและอาจใช้เวลานาน โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
+        st.warning("Gemini จะตรวจ PDF ทั้งเอกสารในคำขอเดียว โดยส่งไฟล์และข้อความ OCR ไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
     elif not gemini_key_available:
         st.info("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ปิดการตรวจแก้ Gemini ไว้ และจะอ่านเอกสารด้วย OCR ตามปกติ")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
@@ -880,11 +1011,26 @@ uploaded = st.file_uploader(
     accept_multiple_files=False,
     help="รองรับเฉพาะไฟล์ .pdf เท่านั้น หากมีไฟล์ Word ให้บันทึกเป็น PDF ก่อน",
 )
+uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
+uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
+previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
+if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
+    st.session_state.pop("ocr_text", None)
+    st.session_state.pop("ocr_status", None)
+    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+elif uploaded_fingerprint and not previous_fingerprint:
+    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 if uploaded is not None:
     st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
+    if uploaded_fingerprint != st.session_state.get("ocr_result_fingerprint"):
+        st.info("ไฟล์นี้ยังไม่ได้ประมวลผล หรือไฟล์ถูกเปลี่ยนแล้ว กรุณากดเริ่มอ่านเอกสาร")
 else:
-    st.info("ยังไม่ได้เลือกไฟล์ PDF — ปุ่มด้านล่างจะแจ้งเตือนให้เลือกไฟล์")
-run = st.button("🔍 เริ่มอ่านและตรวจแก้เอกสาร", type="primary", use_container_width=True)
+    st.info("เลือกไฟล์ PDF เพื่อเริ่มต้น")
+if uploaded is not None and use_gemini_correction:
+    st.info("ความเป็นส่วนตัว: PDF ทั้งเอกสารและข้อความ OCR จะถูกส่งไปยัง Google Gemini เพื่อช่วยตรวจแก้")
+elif uploaded is not None and engine == "typhoon":
+    st.info("ความเป็นส่วนตัว: ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
+run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 if run:
@@ -894,39 +1040,58 @@ if run:
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
     live_output = st.empty()
     live_output.text_area(
-        "ผล OCR แบบทันที",
-        "กำลังรอผลหน้าแรก...",
+        "ตัวอย่างผลระหว่างประมวลผล",
+        "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
         height=680,
-        label_visibility="collapsed",
+        label_visibility="visible",
     )
 
     def publish_live_text(text: str) -> None:
         live_output.text_area(
-            "ผล OCR แบบทันที",
+            "ตัวอย่างผลระหว่างประมวลผล",
             text,
             height=680,
-            label_visibility="collapsed",
+            label_visibility="visible",
         )
 
     try:
         text, errors, failed_images = extract_pdf(
-            uploaded.getvalue(), language, mode, psm, oem, engine,
+            uploaded_bytes, language, mode, psm, oem, engine,
             use_gemini_correction, gemini_model, progress, publish_live_text,
         )
-        progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
-        st.success("อ่านเอกสารสำเร็จ")
+        progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
+        st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+        document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
+        page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
+        if use_gemini_correction and document_errors:
+            result_status = "fallback"
+            st.warning("อ่านเอกสารเสร็จแล้ว แต่ใช้ผล OCR ในเครื่องแทน Gemini เนื่องจากการตรวจแก้ทั้งเอกสารไม่สำเร็จ")
+        elif page_errors:
+            result_status = "partial"
+            st.warning(f"อ่านเอกสารเสร็จแล้ว แต่มี {len(page_errors)} หน้าที่ควรตรวจสอบ")
+        elif use_gemini_correction:
+            result_status = "gemini"
+            st.success("อ่านเอกสารและตรวจแก้ด้วย Gemini สำเร็จ")
+        else:
+            result_status = "local"
+            st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง")
+        st.session_state["ocr_status"] = result_status
         stem = Path(uploaded.name).stem
         st.download_button(
-            "⬇️ ดาวน์โหลดข้อความเป็น .txt",
+            "⬇️ ดาวน์โหลดผล OCR เป็น .txt",
             data="\ufeff" + text,
             file_name=f"{stem}-ocr.txt",
             mime="text/plain;charset=utf-8",
             use_container_width=True,
         )
-        if errors:
-            with st.expander(f"หน้าที่อ่านไม่สำเร็จ ({len(errors)})"):
-                for page_number, error in errors:
+        if document_errors:
+            with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
+                for _, error in document_errors:
+                    st.error(error)
+        if page_errors:
+            with st.expander(f"หน้าที่ควรตรวจสอบ ({len(page_errors)})"):
+                for page_number, error in page_errors:
                     st.error(f"หน้า {page_number}: {error}")
                     failed_image = failed_images.get(page_number)
                     if failed_image is not None:
@@ -939,19 +1104,26 @@ if run:
                         )
     except Exception as exc:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
-        st.error(f"OCR ไม่สำเร็จ: {type(exc).__name__}: {exc}")
+        st.session_state.pop("ocr_text", None)
+        st.session_state.pop("ocr_result_fingerprint", None)
+        st.session_state["ocr_status"] = "failed"
+        st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
 if uploaded is not None:
     st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
     viewer_col, text_col = st.columns([1.15, 1], gap="medium")
     with viewer_col:
         st.caption("PDF ต้นฉบับ")
-        render_pdf_viewer(uploaded.getvalue(), uploaded.name, height=720)
+        render_pdf_viewer(uploaded_bytes, uploaded.name, height=720)
     with text_col:
         st.caption("ข้อความที่ถอดได้")
+        current_result = st.session_state.get("ocr_text", "")
+        result_fingerprint = st.session_state.get("ocr_result_fingerprint")
+        if result_fingerprint != uploaded_fingerprint:
+            current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
         st.text_area(
             "ผล OCR",
-            st.session_state.get("ocr_text", "กด ‘เริ่ม OCR’ เพื่อแสดงข้อความที่ถอดได้"),
+            current_result,
             height=680,
-            label_visibility="collapsed",
+            label_visibility="visible",
         )
