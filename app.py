@@ -1033,12 +1033,33 @@ elif uploaded is not None and engine == "typhoon":
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
+comparison_text = None
+if uploaded is not None:
+    st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
+    viewer_col, text_col = st.columns([1.15, 1], gap="medium")
+    with viewer_col:
+        st.caption("PDF ต้นฉบับ")
+        render_pdf_viewer(uploaded_bytes, uploaded.name, height=720)
+    with text_col:
+        st.caption("ข้อความที่ถอดได้")
+        current_result = st.session_state.get("ocr_text", "")
+        result_fingerprint = st.session_state.get("ocr_result_fingerprint")
+        if result_fingerprint != uploaded_fingerprint:
+            current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
+        comparison_text = st.empty()
+        comparison_text.text_area(
+            "ผล OCR",
+            current_result,
+            height=680,
+            label_visibility="visible",
+        )
+
 if run:
     if uploaded is None:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
-    live_output = st.empty()
+    live_output = comparison_text if comparison_text is not None else st.empty()
     live_output.text_area(
         "ตัวอย่างผลระหว่างประมวลผล",
         "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
@@ -1062,6 +1083,12 @@ if run:
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+        live_output.text_area(
+            "ผล OCR",
+            text,
+            height=680,
+            label_visibility="visible",
+        )
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if use_gemini_correction and document_errors:
@@ -1108,22 +1135,3 @@ if run:
         st.session_state.pop("ocr_result_fingerprint", None)
         st.session_state["ocr_status"] = "failed"
         st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
-
-if uploaded is not None:
-    st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
-    viewer_col, text_col = st.columns([1.15, 1], gap="medium")
-    with viewer_col:
-        st.caption("PDF ต้นฉบับ")
-        render_pdf_viewer(uploaded_bytes, uploaded.name, height=720)
-    with text_col:
-        st.caption("ข้อความที่ถอดได้")
-        current_result = st.session_state.get("ocr_text", "")
-        result_fingerprint = st.session_state.get("ocr_result_fingerprint")
-        if result_fingerprint != uploaded_fingerprint:
-            current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
-        st.text_area(
-            "ผล OCR",
-            current_result,
-            height=680,
-            label_visibility="visible",
-        )
