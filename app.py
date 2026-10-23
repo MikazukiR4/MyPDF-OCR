@@ -332,17 +332,16 @@ def inject_css() -> None:
         div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#ffffff !important; color:#172033 !important; }
         div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#334155 !important; }
         div[data-testid="stProgressBar"] > div { background:#e2e8f0 !important; }
-        div[data-testid="stButton"] > button { background:#dc2626 !important; color:#ffffff !important; border:1px solid #991b1b !important; border-radius:8px !important; font-weight:700
-        div[data-testid="stButton"] > button { background:#1e293b !important; color:#ffffff !important; border:1px solid #0f172a !important; border-radius:8px !important; font-weight:700 !important; }
+        div[data-testid="stButton"] > button { background:#dc2626 !important; color:#ffffff !important; border:1px solid #991b1b !important; border-radius:8px !important; font-weight:700 !important; }
         div[data-testid="stButton"] > button:hover { background:#b91c1c !important; color:#ffffff !important; border-color:#991b1b !important; }
         div[data-testid="stButton"] > button[kind="primary"], button[kind="primary"] { background:var(--accent) !important; color:#ffffff !important; border-color:var(--accent-dark) !important; box-shadow:0 4px 10px rgba(220,38,38,.18); }
         div[data-testid="stButton"] > button[kind="primary"]:hover, button[kind="primary"]:hover { background:var(--accent-dark) !important; color:#ffffff !important; }
         div[data-testid="stFileUploader"] button { background:#334155 !important; color:#ffffff !important; border:1px solid #1e293b !important; border-radius:7px !important; }
         div[data-testid="stFileUploader"] button:hover { background:#475569 !important; color:#ffffff !important; }
-        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border-color:#115e59 !important; font-weight:700 !important; }
+        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; font-weight:700 !important; min-height:44px !important; }
         div[data-testid="stDownloadButton"] > button:hover { background:#115e59 !important; color:#ffffff !important; }
         div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#172033 !important; font-weight:700 !important; }
-        div[data-testid="stTextArea"] textarea { background:#ffffff !important; color:#172033 !important; border:2px solid #cbd5e1 !important; border-radius:10px !important; font-size:16px !important; line-height:1.65 !important; opacity:1 !important; -webkit-text-fill-color:#172033 !important; }
+        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; border-radius:10px !important; font-size:16px !important; line-height:1.7 !important; opacity:1 !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; }
         div[data-testid="stTextArea"] textarea::placeholder { color:#64748b !important; opacity:1 !important; }
         div[data-testid="stAlert"] { color:#172033 !important; border-radius:10px !important; }
         div[data-testid="stAlert"] p { color:inherit !important; }
@@ -363,7 +362,7 @@ def inject_css() -> None:
         .subtitle, .small-note, .stCaption, .stMarkdown, .stMarkdown p, label, label p { color:#cbd5e1 !important; }
         div[data-testid="stFileUploader"], div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#111827 !important; border-color:#64748b !important; color:#f8fafc !important; }
         div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#cbd5e1 !important; }
-        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#f8fafc !important; border-color:#475569 !important; -webkit-text-fill-color:#f8fafc !important; }
+        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; font-size:16px !important; line-height:1.7 !important; }
         div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#f8fafc !important; }
         div[data-testid="stAlert"] { background:#172033 !important; color:#f8fafc !important; border-color:#475569 !important; }
         div[data-testid="stAlert"] p { color:#f8fafc !important; }
@@ -371,7 +370,7 @@ def inject_css() -> None:
         [data-baseweb="select"], [data-baseweb="select"] > div { background:#0f172a !important; border-color:#475569 !important; color:#f8fafc !important; }
         [data-baseweb="select"] * { color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; }
         [role="listbox"], [role="option"] { background:#111827 !important; color:#f8fafc !important; }
-        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; }
+        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
         aside[data-testid="stSidebar"] { background:#111827 !important; }
         </style>
         """,
