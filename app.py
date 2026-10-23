@@ -182,12 +182,12 @@ def gemini_api_key() -> str:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def list_gemini_models() -> list[str]:
-    """Return models available to this API key that support generateContent."""
+def list_gemini_models() -> list[dict[str, object]]:
+    """Return model metadata available to this API key for generateContent."""
     api_key = gemini_api_key()
     if not api_key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
-    models: list[str] = []
+    models: list[dict[str, object]] = []
     page_token = ""
     try:
         while True:
@@ -207,7 +207,14 @@ def list_gemini_models() -> list[str]:
                     if name.startswith("models/"):
                         name = name[7:]
                     if name:
-                        models.append(name)
+                        models.append({
+                            "name": name,
+                            "display_name": model.get("displayName") or name,
+                            "description": model.get("description") or "ไม่มีคำอธิบายจาก API",
+                            "input_token_limit": model.get("inputTokenLimit"),
+                            "output_token_limit": model.get("outputTokenLimit"),
+                            "supported_methods": model.get("supportedGenerationMethods", []),
+                        })
             page_token = result.get("nextPageToken", "")
             if not page_token:
                 break
@@ -216,7 +223,25 @@ def list_gemini_models() -> list[str]:
         raise RuntimeError(f"Gemini ListModels HTTP {exc.code}: {detail[:300]}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"เชื่อมต่อ Gemini ListModels ไม่สำเร็จ: {exc.reason}") from exc
-    return sorted(set(models))
+    unique_models = {str(model["name"]): model for model in models}
+    return [unique_models[name] for name in sorted(unique_models)]
+
+
+def gemini_model_kind(model_name: str) -> str:
+    name = model_name.lower()
+    if "pro" in name:
+        return "Pro — เน้นคุณภาพและการให้เหตุผล"
+    if "flash-lite" in name or "lite" in name:
+        return "Flash-Lite — เร็วและประหยัด"
+    if "flash" in name:
+        return "Flash — สมดุลความเร็วและคุณภาพ"
+    return "รุ่น Gemini อื่น ๆ"
+
+
+def format_token_limit(value: object) -> str:
+    if isinstance(value, (int, float)):
+        return f"{int(value):,} tokens"
+    return "ไม่ระบุ"
 
 
 def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
@@ -616,16 +641,27 @@ with st.sidebar:
         try:
             available_gemini_models = list_gemini_models()
             if available_gemini_models:
+                model_names = [str(model["name"]) for model in available_gemini_models]
                 default_index = (
-                    available_gemini_models.index(GEMINI_MODEL)
-                    if GEMINI_MODEL in available_gemini_models else 0
+                    model_names.index(GEMINI_MODEL)
+                    if GEMINI_MODEL in model_names else 0
                 )
                 gemini_model = st.selectbox(
                     "Gemini รุ่นที่ใช้ตรวจแก้",
-                    available_gemini_models,
+                    model_names,
                     index=default_index,
+                    format_func=lambda name: f"{name} — {gemini_model_kind(name)}",
                     help="รายการนี้มาจากโมเดลที่ API key ปัจจุบันรองรับและประกาศว่ารองรับ generateContent",
                 )
+                selected_metadata = next(model for model in available_gemini_models if model["name"] == gemini_model)
+                st.markdown("**รายละเอียดโมเดลที่เลือก**")
+                st.caption(str(selected_metadata["description"]))
+                st.caption(f"ประเภท: {gemini_model_kind(gemini_model)}")
+                st.caption(
+                    f"รับเข้าได้: {format_token_limit(selected_metadata['input_token_limit'])} · "
+                    f"ตอบกลับได้: {format_token_limit(selected_metadata['output_token_limit'])}"
+                )
+                st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
                 st.caption(f"ตรวจพบ {len(available_gemini_models)} โมเดลที่ใช้ generateContent ได้")
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
