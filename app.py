@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 
@@ -27,6 +28,8 @@ PSM_VALUES = ["6", "3", "4"]
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
+PDF_VIEWER_HTML = Path(__file__).resolve().parent / "pdf-viewer.html"
+PDF_VIEWER_APP_JS = Path(__file__).resolve().parent / "pdf-viewer-app.js"
 
 
 def render_page(pdf_bytes: bytes, page_number: int) -> bytes:
@@ -312,6 +315,50 @@ def extract_pdf(
     finally:
         document.close()
 
+
+def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
+    """Embed the local single-file pdf-viewer.us viewer with the selected PDF."""
+    if not PDF_VIEWER_HTML.exists() or not PDF_VIEWER_APP_JS.exists():
+        st.error("ไม่พบไฟล์ PDF viewer ในโปรเจกต์")
+        return
+    viewer = PDF_VIEWER_HTML.read_text(encoding="utf-8")
+    viewer_js = PDF_VIEWER_APP_JS.read_text(encoding="utf-8")
+    viewer = re.sub(r'<script[^>]+plausible[^>]+></script>', '', viewer, flags=re.I)
+    viewer = viewer.replace(
+        '<script src="/app.js"></script>',
+        f"<script>{viewer_js}</script>",
+    )
+    viewer = viewer.replace(
+        "</body>",
+        """
+        <script>
+        (() => {
+          const payload = window.__THSUMMARIZER_PDF__;
+          if (!payload) return;
+          const bytes = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
+          const file = new File([bytes], payload.name, {type: "application/pdf"});
+          const input = document.getElementById("fileInput");
+          const load = () => {
+            if (typeof window.__pdfViewerReadFile === "function") {
+              window.__pdfViewerReadFile(file);
+            } else if (input) {
+              const transfer = new DataTransfer();
+              transfer.items.add(file);
+              input.files = transfer.files;
+              input.dispatchEvent(new Event("change", {bubbles: true}));
+            }
+          };
+          if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", load, {once: true});
+          else setTimeout(load, 0);
+        })();
+        </script>
+        </body>""",
+    )
+    encoded = base64.b64encode(pdf_bytes).decode("ascii")
+    config = json.dumps({"name": filename, "data": encoded}).replace("<", "\\u003c")
+    viewer = viewer.replace("<head>", f'<head><script>window.__THSUMMARIZER_PDF__={config};</script>', 1)
+    components.html(viewer, height=height, scrolling=True)
+
 def inject_css() -> None:
     st.markdown(
         """
@@ -452,7 +499,7 @@ if run:
         )
         progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
         st.success("อ่านเอกสารสำเร็จ")
-        st.text_area("ข้อความที่อ่านได้", text, height=520)
+        st.session_state["ocr_text"] = text
         stem = Path(uploaded.name).stem
         st.download_button(
             "⬇️ ดาวน์โหลดข้อความเป็น .txt",
@@ -475,3 +522,18 @@ if run:
     except Exception as exc:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.error(f"OCR ไม่สำเร็จ: {type(exc).__name__}: {exc}")
+
+if uploaded is not None:
+    st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
+    viewer_col, text_col = st.columns([1.15, 1], gap="medium")
+    with viewer_col:
+        st.caption("PDF ต้นฉบับ")
+        render_pdf_viewer(uploaded.getvalue(), uploaded.name, height=720)
+    with text_col:
+        st.caption("ข้อความที่ถอดได้")
+        st.text_area(
+            "ผล OCR",
+            st.session_state.get("ocr_text", "กด ‘เริ่ม OCR’ เพื่อแสดงข้อความที่ถอดได้"),
+            height=680,
+            label_visibility="collapsed",
+        )
