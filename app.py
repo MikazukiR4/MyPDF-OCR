@@ -1320,7 +1320,7 @@ elif uploaded_fingerprint and not previous_fingerprint:
 if uploaded is not None:
     st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
     if uploaded_fingerprint != st.session_state.get("ocr_result_fingerprint"):
-        st.info("ไฟล์นี้ยังไม่ได้ประมวลผล หรือไฟล์ถูกเปลี่ยนแล้ว กรุณากดเริ่มอ่านเอกสาร")
+        st.info("ยังไม่มีผล OCR สำหรับไฟล์นี้ กด “เริ่มอ่านเอกสาร” เพื่อประมวลผล")
 else:
     st.info("เลือกไฟล์ PDF เพื่อเริ่มต้น")
 if uploaded is not None and use_gemini_correction:
