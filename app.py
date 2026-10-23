@@ -171,6 +171,11 @@ def _docx_text_box(paragraph: object, text: str, left: float, top: float, width:
     content = OxmlElement("w:txbxContent")
     text_paragraph = OxmlElement("w:p")
     paragraph_properties = OxmlElement("w:pPr")
+    # Each PDF/OCR box already represents one source line. Prevent Word from
+    # reflowing that line and moving words to a different line.
+    no_wrap = OxmlElement("w:wordWrap")
+    no_wrap.set(qn("w:val"), "0")
+    paragraph_properties.append(no_wrap)
     line_spacing = OxmlElement("w:spacing")
     line_spacing.set(qn("w:line"), str(max(80, round(height * 20))))
     line_spacing.set(qn("w:lineRule"), "exact")
@@ -1156,7 +1161,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
+with st.sidebar, st.expander("ตั้งค่าขั้นสูง", expanded=False):
     st.header("ตั้งค่าการอ่านเอกสาร")
     st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
     available_engines = available_ocr_engines()
@@ -1289,11 +1294,12 @@ with st.sidebar:
         st.success("พร้อมใช้ Tesseract ในเครื่อง")
     else:
         st.error("ไม่พบ Tesseract")
-    if use_gemini_correction:
-        st.warning("Gemini จะตรวจ PDF ทั้งเอกสารในคำขอเดียว โดยส่งไฟล์และข้อความ OCR ไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
-    elif not gemini_key_available:
-        st.info("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ปิดการตรวจแก้ Gemini ไว้ และจะอ่านเอกสารด้วย OCR ตามปกติ")
-    st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
+    with st.expander("รายละเอียดการประมวลผล", expanded=False):
+        if use_gemini_correction:
+            st.warning("Gemini จะส่ง PDF และข้อความ OCR ไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
+        elif not gemini_key_available:
+            st.caption("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ระบบจะอ่านเอกสารด้วย OCR ตามปกติ")
+        st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
 st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
 uploaded = st.file_uploader(
@@ -1325,10 +1331,9 @@ run = st.button("🔍 เริ่มอ่านเอกสาร", type="prim
 st.markdown('</div>', unsafe_allow_html=True)
 
 if uploaded is not None:
-    st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
-    st.caption("PDF ต้นฉบับ — viewer ปรับเต็มความกว้างเพื่อไม่ให้หน้ากระดาษถูกตัด")
-    render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
-    st.caption("กด ‘เริ่มอ่านเอกสาร’ เพื่อสร้างผล OCR จากภาพเอกสาร")
+    with st.expander("ดู PDF ต้นฉบับ", expanded=False):
+        st.caption("เปิดเพื่อเทียบกับข้อความ OCR — PDF จะไม่แสดงค้างบนหน้าหลัก")
+        render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
 
 if run:
     if uploaded is None:
@@ -1367,52 +1372,19 @@ if run:
             st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง")
         st.session_state["ocr_status"] = result_status
         stem = Path(uploaded.name).stem
-        st.download_button(
-            "⬇️ ดาวน์โหลดผล OCR เป็น .txt",
-            data="\ufeff" + text,
-            file_name=f"{stem}-ocr.txt",
-            mime="text/plain;charset=utf-8",
-            use_container_width=True,
-        )
-        st.markdown("### ดาวน์โหลดเอกสาร Word")
+        st.markdown("### ดาวน์โหลดผลลัพธ์")
         try:
             editable_docx = export_pdf_editable_docx(uploaded_bytes)
             st.download_button(
-                "⬇️ ดาวน์โหลด DOCX แก้ไขได้ (แนะนำ)",
+                "⬇️ ดาวน์โหลด DOCX\nตัดบรรทัดตามต้นฉบับ",
                 data=editable_docx,
                 file_name=f"{stem}-editable.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                help=(
-                    "ข้อความจะถูกสร้างเป็น Word text จริงและวางตามพิกัดจาก PDF/OCR "
-                    "จึงแก้ไขได้ แต่เส้น ตาราง และรูปภาพบางส่วนอาจไม่เหมือนต้นฉบับทั้งหมด"
-                ),
+                help="ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก",
                 use_container_width=True,
-            )
-            st.caption(
-                "DOCX แก้ไขได้ใช้ข้อความจริงจาก text layer หรือ OCR bounding boxes; "
-                "เหมาะสำหรับแก้เนื้อหาและคงตำแหน่งเดิมให้มากที่สุด"
             )
         except Exception as editable_error:
-            st.warning(f"สร้าง DOCX แก้ไขได้ไม่สำเร็จ: {type(editable_error).__name__}: {editable_error}")
-
-        try:
-            visual_docx = export_pdf_visual_docx(uploaded_bytes)
-            st.download_button(
-                "⬇️ ดาวน์โหลด DOCX ภาพเหมือนต้นฉบับ",
-                data=visual_docx,
-                file_name=f"{stem}-visual.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                help=(
-                    "แต่ละหน้า PDF จะถูกฝังเป็นภาพใน DOCX เพื่อรักษาตาราง รูปภาพ คอลัมน์ "
-                    "และตำแหน่งเดิมให้มากที่สุด โหมดนี้ไม่เหมาะกับการแก้ไขข้อความ"
-                ),
-                use_container_width=True,
-            )
-            st.caption(
-                "DOCX นี้เน้นรักษาหน้าตาเดิมของ PDF และใช้ภาพเต็มหน้า จึงไม่ใช่ข้อความ Word ที่แก้ไขได้"
-            )
-        except Exception as visual_error:
-            st.warning(f"สร้าง DOCX ภาพเหมือนต้นฉบับไม่สำเร็จ: {type(visual_error).__name__}: {visual_error}")
+            st.caption(f"สร้าง DOCX ไม่สำเร็จ: {type(editable_error).__name__}")
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
@@ -1435,4 +1407,5 @@ if run:
         st.session_state.pop("ocr_text", None)
         st.session_state.pop("ocr_result_fingerprint", None)
         st.session_state["ocr_status"] = "failed"
-        st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
+        with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
+            st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
