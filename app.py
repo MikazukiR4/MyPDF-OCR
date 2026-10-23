@@ -44,8 +44,8 @@ def render_page(pdf_bytes: bytes, page_number: int, mode: str = "best") -> bytes
     try:
         page = document[page_number - 1]
         width = max(1, page.rect.width)
-        target_width = 1800 if mode == "fast" else 2400
-        minimum_scale = 1.8 if mode == "fast" else 2.5
+        target_width = 1500 if mode == "fast" else 2400
+        minimum_scale = 1.5 if mode == "fast" else 2.5
         scale = min(4.2, max(minimum_scale, target_width / width))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         return pixmap.tobytes("png")
@@ -58,8 +58,9 @@ def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
     from PIL import Image, ImageFilter, ImageOps
 
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    if image.width < 2000:
-        scale = min(2.5, 2200 / max(1, image.width))
+    target_width = 1500 if mode == "fast" else 2200
+    if image.width < target_width:
+        scale = min(2.5, target_width / max(1, image.width))
         image = image.resize(
             (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
             Image.Resampling.LANCZOS,
