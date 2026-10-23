@@ -498,6 +498,7 @@ def extract_pdf(
     use_gemini_correction: bool,
     gemini_model: str,
     progress: object,
+    page_callback: object | None = None,
 ) -> tuple[str, list[tuple[int, str]], dict[int, bytes]]:
     try:
         import pymupdf as fitz
@@ -520,6 +521,11 @@ def extract_pdf(
         errors: list[tuple[int, str]] = []
         failed_images: dict[int, bytes] = {}
         worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
+
+        def publish_page() -> None:
+            if page_callback is not None:
+                page_callback("\n\n".join(output))
+
         try:
             for page_number in range(1, page_count + 1):
                 ratio = (page_number - 1) / page_count
@@ -539,6 +545,7 @@ def extract_pdf(
                         except Exception as exc:
                             errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {exc}"))
                     output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                    publish_page()
                     ratio = page_number / page_count
                     progress.progress(ratio, text=f"อ่านข้อความฝังหน้า {page_number}/{page_count} เสร็จแล้ว")
                     continue
@@ -554,16 +561,19 @@ def extract_pdf(
                         except Exception as correction_error:
                             errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
                     output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                    publish_page()
                 except Exception as exc:
                     fallback = embedded_pdf_text(document[page_number - 1])
                     if fallback:
                         output.append(
                             f"----- หน้า {page_number} | embedded PDF text -----\n{fallback}"
                         )
+                        publish_page()
                     else:
                         errors.append((page_number, f"{type(exc).__name__}: {exc}"))
                         failed_images[page_number] = image_bytes
                         output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                        publish_page()
                 ratio = page_number / page_count
                 progress.progress(ratio, text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว")
         finally:
@@ -837,10 +847,26 @@ if run:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
+    live_output = st.empty()
+    live_output.text_area(
+        "ผล OCR แบบทันที",
+        "กำลังรอผลหน้าแรก...",
+        height=680,
+        label_visibility="collapsed",
+    )
+
+    def publish_live_text(text: str) -> None:
+        live_output.text_area(
+            "ผล OCR แบบทันที",
+            text,
+            height=680,
+            label_visibility="collapsed",
+        )
+
     try:
         text, errors, failed_images = extract_pdf(
             uploaded.getvalue(), language, mode, psm, oem, engine,
-            use_gemini_correction, gemini_model, progress,
+            use_gemini_correction, gemini_model, progress, publish_live_text,
         )
         progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
         st.success("อ่านเอกสารสำเร็จ")
