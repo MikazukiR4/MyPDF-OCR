@@ -244,6 +244,49 @@ def format_token_limit(value: object) -> str:
     return "ไม่ระบุ"
 
 
+def gemini_model_profile(model_name: str) -> dict[str, object]:
+    """Provide an easy-to-read, approximate profile based on the model family."""
+    name = model_name.lower()
+    if "pro" in name:
+        return {
+            "quality": 5,
+            "speed": 3,
+            "vision": 5,
+            "economy": 2,
+            "best_for": "แก้เอกสารซับซ้อน ต้องการความละเอียดและการให้เหตุผลสูง",
+        }
+    if "flash-lite" in name or "lite" in name:
+        return {
+            "quality": 3,
+            "speed": 5,
+            "vision": 4,
+            "economy": 5,
+            "best_for": "งานจำนวนมากที่ต้องการความเร็วและประหยัดค่าใช้จ่าย",
+        }
+    if "flash" in name:
+        return {
+            "quality": 4,
+            "speed": 4,
+            "vision": 5,
+            "economy": 4,
+            "best_for": "แก้ OCR ภาษาไทยทั่วไป สมดุลระหว่างคุณภาพ ความเร็ว และค่าใช้จ่าย",
+        }
+    return {
+        "quality": 3,
+        "speed": 3,
+        "vision": 3,
+        "economy": 3,
+        "best_for": "ควรทดสอบกับเอกสารจริงก่อนใช้งานจำนวนมาก",
+    }
+
+
+def star_scale(score: object) -> str:
+    if not isinstance(score, int):
+        return "ไม่ระบุ"
+    score = max(0, min(5, score))
+    return "★" * score + "☆" * (5 - score)
+
+
 def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
     """Correct Thai PDF text using the page image as the source of truth."""
     api_key = gemini_api_key()
@@ -661,6 +704,14 @@ with st.sidebar:
                     f"รับเข้าได้: {format_token_limit(selected_metadata['input_token_limit'])} · "
                     f"ตอบกลับได้: {format_token_limit(selected_metadata['output_token_limit'])}"
                 )
+                profile = gemini_model_profile(gemini_model)
+                st.markdown("**คะแนนโดยประมาณสำหรับงานตรวจแก้ OCR**")
+                st.caption(f"คุณภาพการแก้ข้อความ: {star_scale(profile['quality'])}")
+                st.caption(f"ความเร็ว: {star_scale(profile['speed'])}")
+                st.caption(f"ความเข้าใจภาพ/PDF: {star_scale(profile['vision'])}")
+                st.caption(f"ความประหยัดโดยประมาณ: {star_scale(profile['economy'])}")
+                st.info(f"เหมาะกับ: {profile['best_for']}")
+                st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
                 st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
                 st.caption(f"ตรวจพบ {len(available_gemini_models)} โมเดลที่ใช้ generateContent ได้")
             else:
