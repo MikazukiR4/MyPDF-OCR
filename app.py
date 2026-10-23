@@ -906,12 +906,12 @@ def inject_css() -> None:
     )
 
 
-st.set_page_config(page_title="MyPDF OCR — Thai", page_icon="📄", layout="centered")
+st.set_page_config(page_title="MyOCR PDF — Thai", page_icon="📄", layout="centered")
 inject_css()
 
 st.markdown(
     '<div class="mypdf-header"><div class="mypdf-icon">PDF</div>'
-    '<div class="mypdf-name"><span>My</span>PDF OCR</div></div>',
+    '<div class="mypdf-name"><span>MyOCR</span> PDF</div></div>',
     unsafe_allow_html=True,
 )
 st.markdown('<div class="subtitle">อ่านข้อความจาก PDF สแกน — ภาษาไทยและภาษาอังกฤษ</div>', unsafe_allow_html=True)

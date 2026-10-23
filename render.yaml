@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: MyPDF OCR
+    name: MyOCR PDF
     runtime: docker
     plan: free
     region: singapore
