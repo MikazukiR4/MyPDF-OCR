@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+.venv-1
+__pycache__
+*.pyc
+*.log
+.aider*
+.vscode
+output
+static/preview

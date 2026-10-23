@@ -1,11 +1,9 @@
 services:
   - type: web
     name: MyPDF OCR
-    runtime: python
+    runtime: docker
     plan: free
     region: singapore
-    buildCommand: apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng && pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT --server.headless true
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.5
