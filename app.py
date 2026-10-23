@@ -654,9 +654,12 @@ st.markdown('<div class="subtitle">อ่านข้อความจาก PD
 with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
     st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
+    available_engines = ["typhoon", "tesseract"]
+    default_engine = "typhoon" if typhoon_api_key() else "tesseract"
     engine = st.radio(
         "เครื่องมืออ่านเอกสาร",
-        ["typhoon", "tesseract"],
+        available_engines,
+        index=available_engines.index(default_engine),
         format_func=lambda value: {
             "typhoon": "Typhoon OCR — แนะนำสำหรับเอกสารไทย",
             "tesseract": "Tesseract — อ่านในเครื่อง / Offline",
@@ -762,7 +765,7 @@ with st.sidebar:
             st.success("พร้อมใช้ Typhoon OCR")
             st.caption("ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
         else:
-            st.error("ไม่พบ TYPHOON_OCR_API_KEY")
+            st.warning("ยังไม่ได้ตั้งค่า TYPHOON_OCR_API_KEY — กรุณาเลือก Tesseract หรือเพิ่ม API key ใน Render Environment Variables")
     elif tesseract_path():
         st.success("พร้อมใช้ Tesseract ในเครื่อง")
     else:
