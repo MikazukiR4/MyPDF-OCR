@@ -1,6 +1,6 @@
-# MyPDF-style Thai OCR
+# MyOCR PDF
 
-Streamlit OCR สำหรับ PDF สแกน โดยทำงานทีละหน้าแบบเดียวกับ workflow ของ MyPDF:
+Streamlit OCR สำหรับ PDF สแกน โดยทำงานทีละหน้าใน workflow ของ MyOCR PDF:
 
 `PDF → render high-DPI image → Thai OCR → normalize Thai text → TXT`
 

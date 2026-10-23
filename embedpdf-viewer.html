@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>THSummarizer PDF preview</title>
+    <title>MyOCR PDF preview</title>
     <style>
       html, body, #pdf-viewer {
         width: 100%;
@@ -21,7 +21,7 @@
     <script type="module">
       import EmbedPDF from "https://cdn.jsdelivr.net/npm/@embedpdf/snippet@2/dist/embedpdf.js";
 
-      const payload = window.__THSUMMARIZER_PDF__;
+      const payload = window.__MYOCR_PDF__;
       const viewerTarget = document.getElementById("pdf-viewer");
       const errorTarget = document.getElementById("viewer-error");
 

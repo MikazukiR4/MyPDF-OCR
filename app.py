@@ -1,8 +1,7 @@
 import io
-import base64
 import hashlib
+import csv
 from concurrent.futures import ThreadPoolExecutor
-import json
 import os
 import re
 import shutil
@@ -33,9 +32,6 @@ PSM_VALUES = ["3", "6", "4"]
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-PDF_VIEWER_HTML = Path(__file__).resolve().parent / "embedpdf-viewer.html"
-
-
 def render_page(document: object, page_number: int, mode: str = "best") -> bytes:
     """Render one page from an open PyMuPDF document to PNG."""
     try:
@@ -55,6 +51,262 @@ def render_page(document: object, page_number: int, mode: str = "best") -> bytes
     scale = min(4.2, max(minimum_scale, target_width / width))
     pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
     return pixmap.tobytes("png")
+
+
+@st.cache_data(show_spinner=False)
+def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
+    """Create a DOCX that preserves the PDF's visual page layout.
+
+    Each PDF page is rendered as a full-page image in a matching DOCX section.
+    This keeps the original PDF as the source of truth so scanned text, tables,
+    columns, images, stamps, and rotated content remain visually faithful.
+    The resulting page images are not editable Word text.
+    """
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+
+    from docx import Document
+    from docx.enum.section import WD_SECTION
+    from docx.shared import Inches
+
+    if not pdf_bytes:
+        raise ValueError("ไม่พบข้อมูล PDF สำหรับสร้าง DOCX")
+
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if pdf_document.page_count == 0:
+            raise ValueError("ไม่พบหน้าเอกสารใน PDF")
+
+        output = io.BytesIO()
+        word_document = Document()
+        first_section = word_document.sections[0]
+
+        for page_index in range(pdf_document.page_count):
+            page = pdf_document[page_index]
+            page_width = max(1.0, float(page.rect.width))
+            page_height = max(1.0, float(page.rect.height))
+            section = first_section if page_index == 0 else word_document.add_section(WD_SECTION.NEW_PAGE)
+            section.page_width = Inches(page_width / 72.0)
+            section.page_height = Inches(page_height / 72.0)
+            section.top_margin = Inches(0)
+            section.bottom_margin = Inches(0)
+            section.left_margin = Inches(0)
+            section.right_margin = Inches(0)
+            section.header_distance = Inches(0)
+            section.footer_distance = Inches(0)
+
+            # Render at approximately 200 DPI: readable Thai text and table
+            # lines without producing unnecessarily large DOCX files.
+            scale = min(4.2, max(1.5, 200.0 / 72.0))
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image_stream = io.BytesIO(pixmap.tobytes("png"))
+            paragraph = word_document.add_paragraph()
+            paragraph.paragraph_format.space_before = Inches(0)
+            paragraph.paragraph_format.space_after = Inches(0)
+            paragraph.paragraph_format.line_spacing = 1
+            paragraph.add_run().add_picture(
+                image_stream,
+                width=Inches(page_width / 72.0),
+                height=Inches(page_height / 72.0),
+            )
+
+        word_document.core_properties.title = "MyOCR PDF visual PDF export"
+        word_document.core_properties.subject = "PDF page-preserving DOCX export"
+        word_document.core_properties.comments = (
+            "Each page is embedded as an image to preserve the original PDF layout."
+        )
+        word_document.save(output)
+        return output.getvalue()
+    finally:
+        pdf_document.close()
+
+
+def _estimated_text_width(text: str, font_size: float) -> float:
+    """Estimate Word text width in points for fitting a PDF line back into its box."""
+    width = 0.0
+    for char in text:
+        if char.isspace():
+            width += font_size * 0.30
+        elif unicodedata.combining(char) or "\u0e31" <= char <= "\u0e4e":
+            # Thai marks occupy little or no advance width in a rendered line.
+            width += font_size * 0.05
+        elif ord(char) < 128:
+            width += font_size * 0.52
+        else:
+            width += font_size * 0.62
+    return width
+
+
+def _docx_text_box(paragraph: object, text: str, left: float, top: float, width: float, height: float, font_size: float) -> None:
+    """Add an editable, absolutely positioned Word text box to a paragraph."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import nsmap, qn
+
+    # python-docx does not register the legacy VML namespace by default.
+    # Register it before creating the absolutely positioned text box.
+    nsmap.setdefault("v", "urn:schemas-microsoft-com:vml")
+    nsmap.setdefault("o", "urn:schemas-microsoft-com:office:office")
+
+    text = text.strip()
+    if not text:
+        return
+    run = paragraph.add_run()
+    pict = OxmlElement("w:pict")
+    shape = OxmlElement("v:shape")
+    shape.set("id", f"EditablePdfText{len(paragraph._p) + 1}")
+    shape.set(
+        "style",
+        "position:absolute;"
+        f"margin-left:{left:.2f}pt;margin-top:{top:.2f}pt;"
+        f"width:{max(2.0, width):.2f}pt;height:{max(8.0, height):.2f}pt;"
+        "mso-wrap-style:none;mso-fit-shape-to-text:false;v-text-anchor:top;",
+    )
+    shape.set("stroked", "f")
+    shape.set("filled", "f")
+    textbox = OxmlElement("v:textbox")
+    textbox.set("inset", "0,0,0,0")
+    content = OxmlElement("w:txbxContent")
+    text_paragraph = OxmlElement("w:p")
+    paragraph_properties = OxmlElement("w:pPr")
+    line_spacing = OxmlElement("w:spacing")
+    line_spacing.set(qn("w:line"), str(max(80, round(height * 20))))
+    line_spacing.set(qn("w:lineRule"), "exact")
+    paragraph_properties.append(line_spacing)
+    text_paragraph.append(paragraph_properties)
+    text_run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), str(max(2, round(font_size * 2))))
+    run_properties.append(size)
+    estimated_width = _estimated_text_width(text, font_size)
+    character_count = max(1, len(text) - 1)
+    spacing_points = max(-1.5, min(1.5, (width - estimated_width) / character_count))
+    if abs(spacing_points) >= 0.05:
+        character_spacing = OxmlElement("w:spacing")
+        # OOXML stores character spacing in twentieths of a point. Negative
+        # values condense the line; positive values expand it.
+        character_spacing.set(qn("w:val"), str(round(spacing_points * 20)))
+        run_properties.append(character_spacing)
+    text_run.append(run_properties)
+    for part_index, line_part in enumerate(text.splitlines() or [text]):
+        if part_index:
+            line_break = OxmlElement("w:br")
+            line_break.set(qn("w:type"), "textWrapping")
+            text_run.append(line_break)
+        text_node = OxmlElement("w:t")
+        text_node.set(qn("xml:space"), "preserve")
+        text_node.text = line_part
+        text_run.append(text_node)
+    text_paragraph.append(text_run)
+    content.append(text_paragraph)
+    textbox.append(content)
+    shape.append(textbox)
+    pict.append(shape)
+    run._r.append(pict)
+
+
+def _page_text_boxes(page: object) -> list[tuple[str, float, float, float, float, float]]:
+    """Return editable text boxes from a PDF text layer or Tesseract TSV."""
+    boxes: list[tuple[str, float, float, float, float, float]] = []
+    text_dict = page.get_text("dict")
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
+            if not spans:
+                continue
+            x0 = min(float(span["bbox"][0]) for span in spans)
+            y0 = min(float(span["bbox"][1]) for span in spans)
+            x1 = max(float(span["bbox"][2]) for span in spans)
+            y1 = max(float(span["bbox"][3]) for span in spans)
+            text = "".join(span.get("text", "") for span in spans).strip()
+            font_size = max(4.0, max(float(span.get("size", y1 - y0)) for span in spans))
+            boxes.append((text, x0, y0, max(2.0, x1 - x0), max(8.0, y1 - y0), font_size))
+    if boxes:
+        return boxes
+
+    command = tesseract_path()
+    if not command:
+        return boxes
+    image = page.get_pixmap(dpi=300, alpha=False).tobytes("png")
+    with tempfile.TemporaryDirectory(prefix="docx_ocr_") as temp_dir:
+        image_path = Path(temp_dir) / "page.png"
+        image_path.write_bytes(image)
+        result = subprocess.run(
+            [command, str(image_path), "stdout", "-l", "tha+eng", "--psm", "3", "tsv"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+    if result.returncode != 0:
+        return boxes
+    scale = 72.0 / 300.0
+    rows = csv.DictReader(io.StringIO(result.stdout.decode("utf-8", errors="replace")), delimiter="\t")
+    lines: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        text = row.get("text", "").strip()
+        try:
+            confidence = float(row.get("conf", "-1"))
+        except ValueError:
+            confidence = -1
+        if not text or confidence < 0:
+            continue
+        key = (row.get("block_num", ""), row.get("par_num", ""), row.get("line_num", ""), row.get("page_num", ""))
+        lines.setdefault(key, []).append(row)
+    for words in lines.values():
+        left = min(int(word["left"]) for word in words) * scale
+        top = min(int(word["top"]) for word in words) * scale
+        right = max(int(word["left"]) + int(word["width"]) for word in words) * scale
+        bottom = max(int(word["top"]) + int(word["height"]) for word in words) * scale
+        boxes.append((" ".join(word["text"] for word in words), left, top, right - left, bottom - top, max(5.0, (bottom - top) * 0.85)))
+    return boxes
+
+
+@st.cache_data(show_spinner=False)
+def export_pdf_editable_docx(pdf_bytes: bytes) -> bytes:
+    """Create an editable DOCX by positioning real Word text over each PDF page."""
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+    from docx import Document
+    from docx.enum.section import WD_SECTION
+    from docx.shared import Inches
+
+    if not pdf_bytes:
+        raise ValueError("ไม่พบข้อมูล PDF สำหรับสร้าง DOCX ที่แก้ไขได้")
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        output = io.BytesIO()
+        word_document = Document()
+        first_section = word_document.sections[0]
+        for page_index in range(pdf_document.page_count):
+            page = pdf_document[page_index]
+            page_width = max(1.0, float(page.rect.width))
+            page_height = max(1.0, float(page.rect.height))
+            section = first_section if page_index == 0 else word_document.add_section(WD_SECTION.NEW_PAGE)
+            section.page_width = Inches(page_width / 72.0)
+            section.page_height = Inches(page_height / 72.0)
+            section.top_margin = section.bottom_margin = Inches(0)
+            section.left_margin = section.right_margin = Inches(0)
+            section.header_distance = section.footer_distance = Inches(0)
+            paragraph = word_document.add_paragraph()
+            paragraph.paragraph_format.space_before = Inches(0)
+            paragraph.paragraph_format.space_after = Inches(0)
+            for text, left, top, width, height, font_size in _page_text_boxes(page):
+                _docx_text_box(paragraph, text, left, top, width, height, font_size)
+        word_document.core_properties.title = "MyOCR PDF editable DOCX export"
+        word_document.core_properties.subject = "PDF text reconstructed as editable Word text"
+        word_document.core_properties.comments = (
+            "Text is positioned using PDF text-layer or OCR bounding boxes. "
+            "Non-text graphics are not reproduced as a full-page image."
+        )
+        word_document.save(output)
+        return output.getvalue()
+    finally:
+        pdf_document.close()
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
@@ -726,41 +978,32 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Show the uploaded PDF in the browser's native PDF viewer.
+    """Show a PDF with Streamlit's native viewer and always provide a download fallback.
 
-    The native viewer is deliberately used here instead of depending on a
-    third-party JavaScript CDN inside Streamlit's sandboxed iframe. It keeps
-    the PDF preview available when external scripts are blocked or offline.
+    Passing PDF bytes directly to ``st.pdf`` avoids nested data URLs, which can
+    become too large or behave inconsistently in deployed browser iframes.
     """
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
-    encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    safe_filename = json.dumps(filename or "document.pdf", ensure_ascii=False)
-    viewer = f"""
-    <!doctype html>
-    <html lang="th">
-      <head>
-        <meta charset="utf-8">
-        <title>PDF preview</title>
-        <style>
-          html, body {{ margin: 0; width: 100%; height: 100%; background: #172554; }}
-          embed {{ display: block; width: 100%; height: 100%; border: 0; }}
-          .fallback {{ padding: 1rem; color: #e2e8f0; font: 14px sans-serif; }}
-          .fallback a {{ color: #93c5fd; }}
-        </style>
-      </head>
-      <body>
-        <embed src="data:application/pdf;base64,{encoded}" type="application/pdf" title={safe_filename}>
-        <div class="fallback">
-          เบราว์เซอร์ไม่รองรับการแสดง PDF ในหน้านี้
-          <a download={safe_filename} href="data:application/pdf;base64,{encoded}">ดาวน์โหลด {safe_filename}</a>
-        </div>
-      </body>
-    </html>
-    """
-    iframe_src = "data:text/html;base64," + base64.b64encode(viewer.encode("utf-8")).decode("ascii")
-    st.iframe(iframe_src, height=height, alt=f"ตัวอย่าง PDF: {filename or 'document.pdf'}")
+    display_name = filename or "document.pdf"
+    try:
+        st.pdf(
+            pdf_bytes,
+            height=height,
+            alt=f"ตัวอย่าง PDF: {display_name}",
+        )
+    except Exception as exc:
+        st.warning(f"ตัวแสดง PDF ในเบราว์เซอร์ไม่พร้อมใช้งาน: {exc}")
+        st.info("ยังสามารถดาวน์โหลด PDF ต้นฉบับเพื่อเปิดด้วยโปรแกรมอ่าน PDF ได้")
+    st.download_button(
+        "ดาวน์โหลด PDF ต้นฉบับ",
+        data=pdf_bytes,
+        file_name=display_name,
+        mime="application/pdf",
+        key=f"download-pdf-{hashlib.sha256(pdf_bytes).hexdigest()[:16]}",
+        use_container_width=True,
+    )
 
 def inject_css() -> None:
     st.markdown(
@@ -771,7 +1014,7 @@ def inject_css() -> None:
         .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
         header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
         [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
-        .block-container { max-width: 900px; padding-top: 3.5rem; }
+        .block-container { max-width: 1200px; padding-top: 3.5rem; }
         .mypdf-header { display:flex; align-items:center; gap:12px; margin-bottom:2rem; }
         .mypdf-icon { background:var(--accent); color:#fff; border-radius:9px; padding:9px 12px; font-size:24px; box-shadow:0 4px 10px rgba(220,38,38,.2); }
         .mypdf-name { font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.3px; }
@@ -1036,23 +1279,20 @@ st.markdown('</div>', unsafe_allow_html=True)
 comparison_text = None
 if uploaded is not None:
     st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
-    viewer_col, text_col = st.columns([1.15, 1], gap="medium")
-    with viewer_col:
-        st.caption("PDF ต้นฉบับ")
-        render_pdf_viewer(uploaded_bytes, uploaded.name, height=720)
-    with text_col:
-        st.caption("ข้อความที่ถอดได้")
-        current_result = st.session_state.get("ocr_text", "")
-        result_fingerprint = st.session_state.get("ocr_result_fingerprint")
-        if result_fingerprint != uploaded_fingerprint:
-            current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
-        comparison_text = st.empty()
-        comparison_text.text_area(
-            "ผล OCR",
-            current_result,
-            height=680,
-            label_visibility="visible",
-        )
+    st.caption("PDF ต้นฉบับ — viewer ปรับเต็มความกว้างเพื่อไม่ให้หน้ากระดาษถูกตัด")
+    render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
+    st.caption("ข้อความที่ถอดได้")
+    current_result = st.session_state.get("ocr_text", "")
+    result_fingerprint = st.session_state.get("ocr_result_fingerprint")
+    if result_fingerprint != uploaded_fingerprint:
+        current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
+    comparison_text = st.empty()
+    comparison_text.text_area(
+        "ผล OCR",
+        current_result,
+        height=420,
+        label_visibility="visible",
+    )
 
 if run:
     if uploaded is None:
@@ -1112,6 +1352,41 @@ if run:
             mime="text/plain;charset=utf-8",
             use_container_width=True,
         )
+        try:
+            st.markdown("### ดาวน์โหลดเอกสาร Word")
+            editable_docx = export_pdf_editable_docx(uploaded_bytes)
+            st.download_button(
+                "⬇️ ดาวน์โหลด DOCX แก้ไขได้ (แนะนำ)",
+                data=editable_docx,
+                file_name=f"{stem}-editable.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                help=(
+                    "ข้อความจะถูกสร้างเป็น Word text จริงและวางตามพิกัดจาก PDF/OCR "
+                    "จึงแก้ไขได้ แต่เส้น ตาราง และรูปภาพบางส่วนอาจไม่เหมือนต้นฉบับทั้งหมด"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "DOCX แก้ไขได้ใช้ข้อความจริงจาก text layer หรือ OCR bounding boxes; "
+                "เหมาะสำหรับแก้เนื้อหาและคงตำแหน่งเดิมให้มากที่สุด"
+            )
+            visual_docx = export_pdf_visual_docx(uploaded_bytes)
+            st.download_button(
+                "⬇️ ดาวน์โหลด DOCX ภาพเหมือนต้นฉบับ",
+                data=visual_docx,
+                file_name=f"{stem}-visual.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                help=(
+                    "แต่ละหน้า PDF จะถูกฝังเป็นภาพใน DOCX เพื่อรักษาตาราง รูปภาพ คอลัมน์ "
+                    "และตำแหน่งเดิมให้มากที่สุด โหมดนี้ไม่เหมาะกับการแก้ไขข้อความ"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "DOCX นี้เน้นรักษาหน้าตาเดิมของ PDF และใช้ภาพเต็มหน้า จึงไม่ใช่ข้อความ Word ที่แก้ไขได้"
+            )
+        except Exception as export_error:
+            st.warning(f"สร้าง DOCX ไม่สำเร็จ แต่ผล OCR ยังดาวน์โหลดได้: {export_error}")
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
