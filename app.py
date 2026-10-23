@@ -28,7 +28,7 @@ PSM_VALUES = ["6", "3", "4"]
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 PDF_VIEWER_HTML = Path(__file__).resolve().parent / "pdf-viewer.html"
 PDF_VIEWER_APP_JS = Path(__file__).resolve().parent / "pdf-viewer-app.js"
 
@@ -219,6 +219,11 @@ def gemini_correct_text(image_bytes: bytes, source_text: str) -> str:
         ).strip()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 404:
+            raise RuntimeError(
+                f"Gemini HTTP 404: ไม่พบหรือไม่เปิดใช้โมเดล '{GEMINI_MODEL}' "
+                "กรุณาตั้ง GEMINI_MODEL ให้ตรงกับโมเดลที่บัญชีรองรับ เช่น gemini-3.8-flash"
+            ) from exc
         raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:300]}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"เชื่อมต่อ Gemini ไม่สำเร็จ: {exc.reason}") from exc
