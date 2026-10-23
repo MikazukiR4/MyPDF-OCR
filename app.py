@@ -1301,7 +1301,6 @@ with st.sidebar:
             st.caption("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ระบบจะอ่านเอกสารด้วย OCR ตามปกติ")
         st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
-st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
 uploaded = st.file_uploader(
     "เลือกไฟล์ PDF เพื่อเริ่มต้น",
     type=["pdf"],
@@ -1328,7 +1327,6 @@ if uploaded is not None and use_gemini_correction:
 elif uploaded is not None and engine == "typhoon":
     st.info("ความเป็นส่วนตัว: ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
-st.markdown('</div>', unsafe_allow_html=True)
 
 if uploaded is not None:
     with st.expander("ดู PDF ต้นฉบับ", expanded=False):
