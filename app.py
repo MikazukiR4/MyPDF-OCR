@@ -1,6 +1,8 @@
 import io
 import hashlib
 import csv
+import base64
+import json
 from concurrent.futures import ThreadPoolExecutor
 import os
 import re
