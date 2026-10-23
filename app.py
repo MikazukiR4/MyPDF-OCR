@@ -1161,7 +1161,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.sidebar, st.expander("ตั้งค่าขั้นสูง", expanded=False):
+with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
     st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
     available_engines = available_ocr_engines()
