@@ -287,6 +287,19 @@ def star_scale(score: object) -> str:
     return "★" * score + "☆" * (5 - score)
 
 
+def gemini_rating_html(label: str, score: object, description: str) -> str:
+    """Render a rating row with a hover tooltip explaining the 1-5 scale."""
+    return (
+        '<div class="gemini-rating-row" title="'
+        f'{description}'
+        '">'
+        f'<span class="gemini-rating-label">{label}</span>'
+        f'<span class="gemini-rating-stars">{star_scale(score)}</span>'
+        '<span class="gemini-rating-help">ⓘ</span>'
+        '</div>'
+    )
+
+
 def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
     """Correct Thai PDF text using the page image as the source of truth."""
     api_key = gemini_api_key()
@@ -631,6 +644,11 @@ def inject_css() -> None:
         [role="listbox"], [role="option"] { background:#111827 !important; color:#f8fafc !important; }
         div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
         aside[data-testid="stSidebar"] { background:#111827 !important; }
+        .gemini-rating-row { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:help; }
+        .gemini-rating-row:hover { background:#1e293b; }
+        .gemini-rating-label { min-width:145px; color:#e5e7eb; font-size:0.88rem; }
+        .gemini-rating-stars { color:#fbbf24; letter-spacing:1px; font-size:1rem; }
+        .gemini-rating-help { color:#94a3b8; font-size:0.78rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -706,10 +724,22 @@ with st.sidebar:
                 )
                 profile = gemini_model_profile(gemini_model)
                 st.markdown("**คะแนนโดยประมาณสำหรับงานตรวจแก้ OCR**")
-                st.caption(f"คุณภาพการแก้ข้อความ: {star_scale(profile['quality'])}")
-                st.caption(f"ความเร็ว: {star_scale(profile['speed'])}")
-                st.caption(f"ความเข้าใจภาพ/PDF: {star_scale(profile['vision'])}")
-                st.caption(f"ความประหยัดโดยประมาณ: {star_scale(profile['economy'])}")
+                st.markdown(
+                    gemini_rating_html("คุณภาพการแก้ข้อความ", profile["quality"], "1 ดาว = ต่ำ, 3 ดาว = ปานกลาง, 5 ดาว = สูง"),
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    gemini_rating_html("ความเร็ว", profile["speed"], "1 ดาว = ช้า, 3 ดาว = ปานกลาง, 5 ดาว = เร็วมาก"),
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    gemini_rating_html("ความเข้าใจภาพ/PDF", profile["vision"], "1 ดาว = จำกัด, 3 ดาว = ปานกลาง, 5 ดาว = เหมาะกับภาพมาก"),
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    gemini_rating_html("ความประหยัดโดยประมาณ", profile["economy"], "1 ดาว = ใช้ทรัพยากรมาก, 3 ดาว = ปานกลาง, 5 ดาว = ประหยัดมาก"),
+                    unsafe_allow_html=True,
+                )
                 st.info(f"เหมาะกับ: {profile['best_for']}")
                 st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
                 st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
