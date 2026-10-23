@@ -1090,15 +1090,10 @@ if run:
     )
 
     def publish_live_text(text: str) -> None:
-        # Keep the live OCR result inside a scrollable textbox while replacing
-        # the content in the same placeholder.
-        live_output.text_area(
-            "ตัวอย่างผลระหว่างประมวลผล",
-            text,
-            height=680,
-            label_visibility="visible",
-            key="ocr-live",
-        )
+        # Do not create another keyed widget from the callback. Streamlit
+        # treats each text_area call as a new widget, even in the same
+        # placeholder, so reusing key="ocr-live" causes DuplicateElementKey.
+        live_output.text(text)
 
     try:
         text, errors, failed_images = extract_pdf(
