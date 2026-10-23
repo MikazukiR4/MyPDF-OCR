@@ -1310,7 +1310,7 @@ if run:
 
     def publish_ocr_preview(current_text: str) -> None:
         if current_text:
-            ocr_preview.text_area("ผล OCR", current_text, height=680, key="ocr-preview")
+            ocr_preview.text_area("ผล OCR", current_text, height=680)
 
     try:
         text, errors, failed_images = extract_pdf(
@@ -1321,7 +1321,7 @@ if run:
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
-        ocr_preview.text_area("ผล OCR", text, height=680, key="ocr-preview")
+        ocr_preview.text_area("ผล OCR", text, height=680)
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if use_gemini_correction and document_errors:
@@ -1383,7 +1383,7 @@ if (
     and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
     and st.session_state.get("ocr_text")
 ):
-    ocr_preview.text_area("ผล OCR", st.session_state["ocr_text"], height=680, key="ocr-preview")
+    ocr_preview.text_area("ผล OCR", st.session_state["ocr_text"], height=680)
 
 if (
     uploaded is not None
