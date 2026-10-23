@@ -291,11 +291,21 @@ def gemini_model_option_label(model_name: str) -> str:
     """Show the model's quick comparison scale directly in the dropdown options."""
     profile = gemini_model_profile(model_name)
     return (
-        f"{model_name} | Q {star_scale(profile['quality'])} · "
-        f"S {star_scale(profile['speed'])} · "
-        f"V {star_scale(profile['vision'])} · "
-        f"E {star_scale(profile['economy'])}"
+        f"{model_name} | คุณภาพ {star_scale(profile['quality'])} · "
+        f"เร็ว {star_scale(profile['speed'])} · "
+        f"ภาพ {star_scale(profile['vision'])} · "
+        f"ประหยัด {star_scale(profile['economy'])}"
     )
+
+
+def gemini_model_is_recommended(model_name: str) -> bool:
+    """Keep the main picker focused on text/image models suitable for PDF correction."""
+    name = model_name.lower()
+    excluded_terms = (
+        "tts", "image", "audio", "transcribe", "robotics", "computer-use",
+        "lyria", "antigravity", "deep-research", "nano-banana",
+    )
+    return ("flash" in name or "pro" in name) and not any(term in name for term in excluded_terms)
 
 
 def gemini_rating_html(label: str, score: object, description: str) -> str:
@@ -681,7 +691,8 @@ st.markdown(
 st.markdown('<div class="subtitle">อ่านข้อความจาก PDF สแกน — ภาษาไทยและภาษาอังกฤษ</div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("ตั้งค่า OCR")
+    st.header("ตั้งค่าการอ่านเอกสาร")
+    st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
     engine = st.radio(
         "เครื่องมืออ่านเอกสาร",
         ["typhoon", "tesseract"],
@@ -696,41 +707,59 @@ with st.sidebar:
         format_func=lambda value: {"tha": "ไทย", "tha+eng": "ไทย + อังกฤษ", "eng": "อังกฤษ"}[value],
     )
     mode = st.selectbox(
-        "คุณภาพภาพ",
+        "การประมวลผลภาพสำหรับ OCR",
         ["best", "fast"],
         format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
+        help="มีผลหลักกับ Tesseract เท่านั้น ระบบจะใช้ข้อความฝังใน PDF ก่อนเมื่อมีอยู่แล้ว",
     )
     psm = st.selectbox(
-        "รูปแบบเอกสาร",
+        "รูปแบบหน้าเอกสาร (Tesseract)",
         PSM_VALUES,
         index=0,
         format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "บล็อกข้อความ / ตาราง", "4": "คอลัมน์เดียว"}[value],
+        help="มีผลเฉพาะเมื่อเลือก Tesseract หากเลือก Typhoon หรือใช้ข้อความฝังใน PDF ตัวเลือกนี้ไม่มีผล",
+        disabled=engine != "tesseract",
     )
     oem = OEM_LSTM_ONLY
+    st.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
     use_gemini_correction = st.checkbox(
-        "ให้ Gemini ตรวจแก้สระ/วรรณยุกต์จากภาพต้นฉบับ",
+        "ใช้ Gemini ตรวจแก้สระและวรรณยุกต์",
         value=False,
-        help="ใช้ข้อความเดิมร่วมกับภาพ PDF เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ โดยไม่สรุปหรือเพิ่มเนื้อหา",
+        help="Gemini จะใช้ภาพ PDF ร่วมกับข้อความที่อ่านได้ เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ",
     )
     gemini_model = GEMINI_MODEL
     if use_gemini_correction and gemini_api_key():
         try:
             available_gemini_models = list_gemini_models()
             if available_gemini_models:
-                model_names = [str(model["name"]) for model in available_gemini_models]
+                recommended_models = [
+                    model for model in available_gemini_models
+                    if gemini_model_is_recommended(str(model["name"]))
+                ]
+                show_advanced_models = st.checkbox(
+                    "แสดง Gemini รุ่นขั้นสูงทั้งหมด",
+                    value=False,
+                    help="เปิดเพื่อดูรุ่นเฉพาะทาง เช่น TTS, Image, Robotics และรุ่นทดลอง",
+                )
+                selectable_models = available_gemini_models if show_advanced_models else recommended_models
+                model_names = [str(model["name"]) for model in selectable_models]
+                if not model_names:
+                    st.warning("ไม่พบรุ่นที่แนะนำ จะแสดงโมเดลทั้งหมดแทน")
+                    selectable_models = available_gemini_models
+                    model_names = [str(model["name"]) for model in selectable_models]
                 default_index = (
                     model_names.index(GEMINI_MODEL)
                     if GEMINI_MODEL in model_names else 0
                 )
                 gemini_model = st.selectbox(
-                    "Gemini รุ่นที่ใช้ตรวจแก้",
+                    "รุ่น Gemini สำหรับตรวจแก้",
                     model_names,
                     index=default_index,
                     format_func=gemini_model_option_label,
-                    help="เปิดรายการเพื่อเปรียบเทียบดาวของแต่ละรุ่นได้ทันที: คุณภาพ · ความเร็ว · ภาพ · ความประหยัด",
+                    help="ค่าเริ่มต้นจะแสดงเฉพาะรุ่นที่เหมาะกับการตรวจแก้ข้อความและภาพ PDF",
                 )
-                selected_metadata = next(model for model in available_gemini_models if model["name"] == gemini_model)
-                st.markdown("**รายละเอียดโมเดลที่เลือก**")
+                selected_metadata = next(model for model in selectable_models if model["name"] == gemini_model)
+                st.markdown("**รุ่นที่เลือก**")
                 st.caption(str(selected_metadata["description"]))
                 st.caption(f"ประเภท: {gemini_model_kind(gemini_model)}")
                 st.caption(
@@ -758,9 +787,9 @@ with st.sidebar:
                 st.info(f"เหมาะกับ: {profile['best_for']}")
                 st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
                 st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
-                st.caption(f"ตรวจพบ {len(available_gemini_models)} โมเดลที่ใช้ generateContent ได้")
+                st.caption(f"แสดง {len(selectable_models)} จาก {len(available_gemini_models)} โมเดลที่ใช้ได้")
                 comparison_rows = []
-                for model_info in available_gemini_models:
+                for model_info in selectable_models:
                     model_name = str(model_info["name"])
                     model_profile = gemini_model_profile(model_name)
                     comparison_rows.append({
@@ -770,7 +799,7 @@ with st.sidebar:
                         "ภาพ/PDF": star_scale(model_profile["vision"]),
                         "ประหยัด": star_scale(model_profile["economy"]),
                     })
-                with st.expander("ดูตารางเปรียบเทียบโมเดลทั้งหมด", expanded=False):
+                with st.expander("เปรียบเทียบรุ่นที่แสดง", expanded=False):
                     st.table(comparison_rows)
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
@@ -789,7 +818,7 @@ with st.sidebar:
         st.error("ไม่พบ Tesseract")
     if use_gemini_correction:
         if gemini_api_key():
-            st.warning("Gemini จะถูกเรียกทีละหน้าและอาจใช้โควตา API")
+            st.warning("Gemini จะตรวจทีละหน้า โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
         else:
             st.error("ไม่พบ GEMINI_API_KEY")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
@@ -805,7 +834,7 @@ if uploaded is not None:
     st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
 else:
     st.info("ยังไม่ได้เลือกไฟล์ PDF — ปุ่มด้านล่างจะแจ้งเตือนให้เลือกไฟล์")
-run = st.button("🔍 เริ่ม OCR", type="primary", use_container_width=True)
+run = st.button("🔍 เริ่มอ่านและตรวจแก้เอกสาร", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 if run:
