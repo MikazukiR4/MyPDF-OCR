@@ -1,8 +1,6 @@
 import io
-import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
-import json
 import os
 import re
 import shutil
@@ -33,9 +31,6 @@ PSM_VALUES = ["3", "6", "4"]
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-PDF_VIEWER_HTML = Path(__file__).resolve().parent / "embedpdf-viewer.html"
-
-
 def render_page(document: object, page_number: int, mode: str = "best") -> bytes:
     """Render one page from an open PyMuPDF document to PNG."""
     try:
@@ -55,6 +50,76 @@ def render_page(document: object, page_number: int, mode: str = "best") -> bytes
     scale = min(4.2, max(minimum_scale, target_width / width))
     pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
     return pixmap.tobytes("png")
+
+
+@st.cache_data(show_spinner=False)
+def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
+    """Create a DOCX that preserves the PDF's visual page layout.
+
+    Each PDF page is rendered as a full-page image in a matching DOCX section.
+    This keeps the original PDF as the source of truth so scanned text, tables,
+    columns, images, stamps, and rotated content remain visually faithful.
+    The resulting page images are not editable Word text.
+    """
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+
+    from docx import Document
+    from docx.enum.section import WD_SECTION
+    from docx.shared import Inches
+
+    if not pdf_bytes:
+        raise ValueError("ไม่พบข้อมูล PDF สำหรับสร้าง DOCX")
+
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if pdf_document.page_count == 0:
+            raise ValueError("ไม่พบหน้าเอกสารใน PDF")
+
+        output = io.BytesIO()
+        word_document = Document()
+        first_section = word_document.sections[0]
+
+        for page_index in range(pdf_document.page_count):
+            page = pdf_document[page_index]
+            page_width = max(1.0, float(page.rect.width))
+            page_height = max(1.0, float(page.rect.height))
+            section = first_section if page_index == 0 else word_document.add_section(WD_SECTION.NEW_PAGE)
+            section.page_width = Inches(page_width / 72.0)
+            section.page_height = Inches(page_height / 72.0)
+            section.top_margin = Inches(0)
+            section.bottom_margin = Inches(0)
+            section.left_margin = Inches(0)
+            section.right_margin = Inches(0)
+            section.header_distance = Inches(0)
+            section.footer_distance = Inches(0)
+
+            # Render at approximately 200 DPI: readable Thai text and table
+            # lines without producing unnecessarily large DOCX files.
+            scale = min(4.2, max(1.5, 200.0 / 72.0))
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image_stream = io.BytesIO(pixmap.tobytes("png"))
+            paragraph = word_document.add_paragraph()
+            paragraph.paragraph_format.space_before = Inches(0)
+            paragraph.paragraph_format.space_after = Inches(0)
+            paragraph.paragraph_format.line_spacing = 1
+            paragraph.add_run().add_picture(
+                image_stream,
+                width=Inches(page_width / 72.0),
+                height=Inches(page_height / 72.0),
+            )
+
+        word_document.core_properties.title = "MyOCR PDF visual PDF export"
+        word_document.core_properties.subject = "PDF page-preserving DOCX export"
+        word_document.core_properties.comments = (
+            "Each page is embedded as an image to preserve the original PDF layout."
+        )
+        word_document.save(output)
+        return output.getvalue()
+    finally:
+        pdf_document.close()
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
@@ -726,41 +791,32 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Show the uploaded PDF in the browser's native PDF viewer.
+    """Show a PDF with Streamlit's native viewer and always provide a download fallback.
 
-    The native viewer is deliberately used here instead of depending on a
-    third-party JavaScript CDN inside Streamlit's sandboxed iframe. It keeps
-    the PDF preview available when external scripts are blocked or offline.
+    Passing PDF bytes directly to ``st.pdf`` avoids nested data URLs, which can
+    become too large or behave inconsistently in deployed browser iframes.
     """
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
-    encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    safe_filename = json.dumps(filename or "document.pdf", ensure_ascii=False)
-    viewer = f"""
-    <!doctype html>
-    <html lang="th">
-      <head>
-        <meta charset="utf-8">
-        <title>PDF preview</title>
-        <style>
-          html, body {{ margin: 0; width: 100%; height: 100%; background: #172554; }}
-          embed {{ display: block; width: 100%; height: 100%; border: 0; }}
-          .fallback {{ padding: 1rem; color: #e2e8f0; font: 14px sans-serif; }}
-          .fallback a {{ color: #93c5fd; }}
-        </style>
-      </head>
-      <body>
-        <embed src="data:application/pdf;base64,{encoded}" type="application/pdf" title={safe_filename}>
-        <div class="fallback">
-          เบราว์เซอร์ไม่รองรับการแสดง PDF ในหน้านี้
-          <a download={safe_filename} href="data:application/pdf;base64,{encoded}">ดาวน์โหลด {safe_filename}</a>
-        </div>
-      </body>
-    </html>
-    """
-    iframe_src = "data:text/html;base64," + base64.b64encode(viewer.encode("utf-8")).decode("ascii")
-    st.iframe(iframe_src, height=height, alt=f"ตัวอย่าง PDF: {filename or 'document.pdf'}")
+    display_name = filename or "document.pdf"
+    try:
+        st.pdf(
+            pdf_bytes,
+            height=height,
+            alt=f"ตัวอย่าง PDF: {display_name}",
+        )
+    except Exception as exc:
+        st.warning(f"ตัวแสดง PDF ในเบราว์เซอร์ไม่พร้อมใช้งาน: {exc}")
+        st.info("ยังสามารถดาวน์โหลด PDF ต้นฉบับเพื่อเปิดด้วยโปรแกรมอ่าน PDF ได้")
+    st.download_button(
+        "ดาวน์โหลด PDF ต้นฉบับ",
+        data=pdf_bytes,
+        file_name=display_name,
+        mime="application/pdf",
+        key=f"download-pdf-{hashlib.sha256(pdf_bytes).hexdigest()[:16]}",
+        use_container_width=True,
+    )
 
 def inject_css() -> None:
     st.markdown(
@@ -1112,6 +1168,25 @@ if run:
             mime="text/plain;charset=utf-8",
             use_container_width=True,
         )
+        try:
+            visual_docx = export_pdf_visual_docx(uploaded_bytes)
+            st.download_button(
+                "⬇️ ดาวน์โหลด DOCX โดยรักษารูปแบบหน้าเดิม",
+                data=visual_docx,
+                file_name=f"{stem}-visual.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                help=(
+                    "แต่ละหน้า PDF จะถูกฝังเป็นภาพใน DOCX เพื่อรักษาตาราง รูปภาพ คอลัมน์ "
+                    "และตำแหน่งเดิมให้มากที่สุด ข้อความในโหมดนี้ไม่ใช่ข้อความ Word ที่แก้ไขได้"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "DOCX นี้เน้นรักษาหน้าตาเดิมของ PDF; หากต้องการแก้ข้อความ แนะนำใช้ไฟล์ .txt "
+                "เป็นต้นฉบับสำหรับจัดทำเอกสารใหม่"
+            )
+        except Exception as export_error:
+            st.warning(f"สร้าง DOCX ไม่สำเร็จ แต่ผล OCR ยังดาวน์โหลดได้: {export_error}")
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:

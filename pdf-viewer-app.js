@@ -93,7 +93,7 @@
     reader.readAsArrayBuffer(file);
   }
 
-  // Embedded host API used by THSummarizer. It keeps the viewer local and
+  // Embedded host API used by MyOCR PDF. It keeps the viewer local and
   // avoids requiring a second upload or a network URL.
   window.__pdfViewerReadFile = readFile;
 
