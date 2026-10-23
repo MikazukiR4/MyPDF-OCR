@@ -126,20 +126,18 @@ def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
         pdf_document.close()
 
 
-def _estimated_text_width(text: str, font_size: float) -> float:
-    """Estimate Word text width in points for fitting a PDF line back into its box."""
-    width = 0.0
-    for char in text:
-        if char.isspace():
-            width += font_size * 0.30
-        elif unicodedata.combining(char) or "\u0e31" <= char <= "\u0e4e":
-            # Thai marks occupy little or no advance width in a rendered line.
-            width += font_size * 0.05
-        elif ord(char) < 128:
-            width += font_size * 0.52
-        else:
-            width += font_size * 0.62
-    return width
+def _normalize_pdf_text(text: str) -> str:
+    """Normalize PDF glyph artifacts without rewriting document content."""
+    text = text.translate(str.maketrans({
+        "\uf70a": "\u0e48",
+        "\uf70b": "\u0e49",
+        "\uf70e": "\u0e4c",
+    }))
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
+    text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "ำ\\1", text)
+    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
+    return text.strip()
 
 
 def _docx_text_box(paragraph: object, text: str, left: float, top: float, width: float, height: float, font_size: float) -> None:
@@ -152,7 +150,7 @@ def _docx_text_box(paragraph: object, text: str, left: float, top: float, width:
     nsmap.setdefault("v", "urn:schemas-microsoft-com:vml")
     nsmap.setdefault("o", "urn:schemas-microsoft-com:office:office")
 
-    text = text.strip()
+    text = _normalize_pdf_text(text)
     if not text:
         return
     run = paragraph.add_run()
@@ -180,18 +178,13 @@ def _docx_text_box(paragraph: object, text: str, left: float, top: float, width:
     text_paragraph.append(paragraph_properties)
     text_run = OxmlElement("w:r")
     run_properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attribute in ("ascii", "hAnsi", "cs", "eastAsia"):
+        fonts.set(qn(f"w:{attribute}"), "Tahoma")
+    run_properties.append(fonts)
     size = OxmlElement("w:sz")
     size.set(qn("w:val"), str(max(2, round(font_size * 2))))
     run_properties.append(size)
-    estimated_width = _estimated_text_width(text, font_size)
-    character_count = max(1, len(text) - 1)
-    spacing_points = max(-1.5, min(1.5, (width - estimated_width) / character_count))
-    if abs(spacing_points) >= 0.05:
-        character_spacing = OxmlElement("w:spacing")
-        # OOXML stores character spacing in twentieths of a point. Negative
-        # values condense the line; positive values expand it.
-        character_spacing.set(qn("w:val"), str(round(spacing_points * 20)))
-        run_properties.append(character_spacing)
     text_run.append(run_properties)
     for part_index, line_part in enumerate(text.splitlines() or [text]):
         if part_index:
@@ -211,8 +204,8 @@ def _docx_text_box(paragraph: object, text: str, left: float, top: float, width:
 
 
 def _page_text_boxes(page: object) -> list[tuple[str, float, float, float, float, float]]:
-    """Return editable text boxes from a PDF text layer or Tesseract TSV."""
-    boxes: list[tuple[str, float, float, float, float, float]] = []
+    """Return editable boxes, rejecting corrupt PDF text layers before OCR."""
+    text_boxes: list[tuple[str, float, float, float, float, float]] = []
     text_dict = page.get_text("dict")
     for block in text_dict.get("blocks", []):
         for line in block.get("lines", []):
@@ -225,10 +218,40 @@ def _page_text_boxes(page: object) -> list[tuple[str, float, float, float, float
             y1 = max(float(span["bbox"][3]) for span in spans)
             text = "".join(span.get("text", "") for span in spans).strip()
             font_size = max(4.0, max(float(span.get("size", y1 - y0)) for span in spans))
-            boxes.append((text, x0, y0, max(2.0, x1 - x0), max(8.0, y1 - y0), font_size))
-    if boxes:
-        return boxes
+            text_boxes.append((text, x0, y0, max(2.0, x1 - x0), max(8.0, y1 - y0), font_size))
 
+    raw_text = "\n".join(item[0] for item in text_boxes)
+    thai_chars = len(re.findall(r"[ก-๙]", raw_text))
+    # Thai PDF text layers are frequently font-glyph mappings rather than
+    # reliable Unicode. Prefer OCR boxes for Thai so Word receives real Thai
+    # characters instead of the PDF's broken extraction sequence.
+    if thai_chars >= 20 or _pdf_text_layer_is_corrupt(raw_text):
+        ocr_boxes = _tesseract_text_boxes(page)
+        if ocr_boxes:
+            return ocr_boxes
+    if text_boxes:
+        return [(_normalize_pdf_text(item[0]), *item[1:]) for item in text_boxes]
+    return []
+
+
+def _pdf_text_layer_is_corrupt(text: str) -> bool:
+    """Detect common Thai PDF extraction failures before creating Word text."""
+    if not text.strip():
+        return True
+    if "�" in text or any("\uf700" <= char <= "\uf8ff" for char in text):
+        return True
+    if re.search(r"[\x80-\x9f]|(?:Ã|Â|â|เธ)[\x80-\x9f]", text):
+        return True
+    thai_chars = len(re.findall(r"[ก-๙]", text))
+    if thai_chars < 40:
+        return False
+    single_thai_tokens = len(re.findall(r"(?<![ก-๙])[ก-๙](?=\s|$)", text))
+    return single_thai_tokens / thai_chars > 0.08
+
+
+def _tesseract_text_boxes(page: object) -> list[tuple[str, float, float, float, float, float]]:
+    """Run Thai+English Tesseract and return line boxes in PDF points."""
+    boxes: list[tuple[str, float, float, float, float, float]] = []
     command = tesseract_path()
     if not command:
         return boxes
@@ -414,7 +437,7 @@ def typhoon_api_key() -> str:
 
 def available_ocr_engines() -> list[str]:
     """Return only OCR engines that can actually run in this deployment."""
-    engines = ["tesseract"]
+    engines = ["tesseract"] if tesseract_path() else []
     if typhoon_api_key():
         engines.insert(0, "typhoon")
     return engines
@@ -901,30 +924,17 @@ def extract_pdf(
                     ratio = (page_number - 1) / page_count
                     progress.progress(ratio * 0.5, text=f"กำลังเตรียมหน้า {page_number}/{page_count}")
                     page = document[page_number - 1]
-                    embedded = embedded_pdf_text(page)
-                    # Born-digital PDFs already contain selectable text. Prefer it
-                    # over image OCR to avoid corrupting Thai text and wasting API calls.
-                    if len(embedded) >= 80:
-                        text = embedded
-                        image_bytes = render_page(document, page_number, mode) if use_gemini_correction and not gemini_document_mode else None
-                        page_data[page_number] = (text, "embedded PDF text", image_bytes)
-                        if image_bytes is not None and not gemini_document_mode:
-                            gemini_jobs[page_number] = (image_bytes, text)
-                        continue
                     image_bytes = render_page(document, page_number, mode)
                     try:
                         text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
-                        text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
+                        if not text:
+                            raise RuntimeError("OCR engine ส่งข้อความว่างกลับมา")
                         page_data[page_number] = (text, engine, image_bytes)
                         if use_gemini_correction and not gemini_document_mode and text and not text.startswith("["):
                             gemini_jobs[page_number] = (image_bytes, text)
                     except Exception as exc:
-                        fallback = embedded_pdf_text(document[page_number - 1])
-                        if fallback:
-                            page_data[page_number] = (fallback, "embedded PDF text", image_bytes)
-                        else:
-                            errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-                            failed_images[page_number] = image_bytes
+                        errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+                        failed_images[page_number] = image_bytes
 
                 futures = {}
                 if gemini_jobs:
@@ -1150,6 +1160,9 @@ with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
     st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
     available_engines = available_ocr_engines()
+    if not available_engines:
+        st.error("ยังไม่พบ OCR engine: ติดตั้ง Tesseract พร้อมภาษาไทย หรือกำหนด TYPHOON_OCR_API_KEY")
+        st.stop()
     default_engine = available_engines[0]
     engine = st.radio(
         "เครื่องมืออ่านเอกสาร",
@@ -1174,7 +1187,7 @@ with st.sidebar:
         "การประมวลผลภาพสำหรับ OCR",
         ["best", "fast"],
         format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
-        help="มีผลหลักกับ Tesseract เท่านั้น ระบบจะใช้ข้อความฝังใน PDF ก่อนเมื่อมีอยู่แล้ว",
+        help="มีผลกับ Tesseract เท่านั้น ระบบจะอ่านข้อความจากภาพเพื่อหลีกเลี่ยง text layer ของ PDF ที่อาจถอดภาษาไทยผิด",
     )
     if engine == "tesseract":
         psm = st.selectbox(
@@ -1335,20 +1348,18 @@ if run:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
-    live_output = comparison_text if comparison_text is not None else st.empty()
-    live_output.text_area(
-        "ตัวอย่างผลระหว่างประมวลผล",
+    st.markdown("### ผลระหว่างประมวลผล")
+    live_output = st.empty()
+    live_output.code(
         "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
-        height=680,
-        label_visibility="visible",
-        key="ocr-live",
+        language=None,
     )
 
     def publish_live_text(text: str) -> None:
         # Do not create another keyed widget from the callback. Streamlit
         # treats each text_area call as a new widget, even in the same
         # placeholder, so reusing key="ocr-live" causes DuplicateElementKey.
-        live_output.text(text)
+        live_output.code(text, language=None)
 
     try:
         text, errors, failed_images = extract_pdf(
@@ -1358,7 +1369,8 @@ if run:
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
-        live_output.text_area(
+        st.markdown("### ผล OCR ฉบับสมบูรณ์")
+        st.text_area(
             "ผล OCR",
             text,
             height=680,
@@ -1388,8 +1400,8 @@ if run:
             mime="text/plain;charset=utf-8",
             use_container_width=True,
         )
+        st.markdown("### ดาวน์โหลดเอกสาร Word")
         try:
-            st.markdown("### ดาวน์โหลดเอกสาร Word")
             editable_docx = export_pdf_editable_docx(uploaded_bytes)
             st.download_button(
                 "⬇️ ดาวน์โหลด DOCX แก้ไขได้ (แนะนำ)",
@@ -1406,6 +1418,10 @@ if run:
                 "DOCX แก้ไขได้ใช้ข้อความจริงจาก text layer หรือ OCR bounding boxes; "
                 "เหมาะสำหรับแก้เนื้อหาและคงตำแหน่งเดิมให้มากที่สุด"
             )
+        except Exception as editable_error:
+            st.warning(f"สร้าง DOCX แก้ไขได้ไม่สำเร็จ: {type(editable_error).__name__}: {editable_error}")
+
+        try:
             visual_docx = export_pdf_visual_docx(uploaded_bytes)
             st.download_button(
                 "⬇️ ดาวน์โหลด DOCX ภาพเหมือนต้นฉบับ",
@@ -1421,8 +1437,8 @@ if run:
             st.caption(
                 "DOCX นี้เน้นรักษาหน้าตาเดิมของ PDF และใช้ภาพเต็มหน้า จึงไม่ใช่ข้อความ Word ที่แก้ไขได้"
             )
-        except Exception as export_error:
-            st.warning(f"สร้าง DOCX ไม่สำเร็จ แต่ผล OCR ยังดาวน์โหลดได้: {export_error}")
+        except Exception as visual_error:
+            st.warning(f"สร้าง DOCX ภาพเหมือนต้นฉบับไม่สำเร็จ: {type(visual_error).__name__}: {visual_error}")
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
