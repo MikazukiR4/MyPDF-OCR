@@ -1324,52 +1324,26 @@ elif uploaded is not None and engine == "typhoon":
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-comparison_text = None
 if uploaded is not None:
     st.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
     st.caption("PDF ต้นฉบับ — viewer ปรับเต็มความกว้างเพื่อไม่ให้หน้ากระดาษถูกตัด")
     render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
-    st.caption("ข้อความที่ถอดได้")
-    current_result = st.session_state.get("ocr_text", "")
-    result_fingerprint = st.session_state.get("ocr_result_fingerprint")
-    if result_fingerprint != uploaded_fingerprint:
-        current_result = "ไฟล์นี้ยังไม่มีผล OCR — กด ‘เริ่มอ่านเอกสาร’ เพื่อประมวลผล"
-    comparison_text = st.empty()
-    comparison_text.text_area(
-        "ผล OCR",
-        current_result,
-        height=420,
-        label_visibility="visible",
-        key="ocr-preview",
-    )
+    st.caption("กด ‘เริ่มอ่านเอกสาร’ เพื่อสร้างผล OCR จากภาพเอกสาร")
 
 if run:
     if uploaded is None:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
-    st.markdown("### ผลระหว่างประมวลผล")
-    live_output = st.empty()
-    live_output.code(
-        "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
-        language=None,
-    )
-
-    def publish_live_text(text: str) -> None:
-        # Do not create another keyed widget from the callback. Streamlit
-        # treats each text_area call as a new widget, even in the same
-        # placeholder, so reusing key="ocr-live" causes DuplicateElementKey.
-        live_output.code(text, language=None)
 
     try:
         text, errors, failed_images = extract_pdf(
             uploaded_bytes, language, mode, psm, oem, engine,
-            use_gemini_correction, gemini_model, progress, publish_live_text,
+            use_gemini_correction, gemini_model, progress,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
-        st.markdown("### ผล OCR ฉบับสมบูรณ์")
         st.text_area(
             "ผล OCR",
             text,
