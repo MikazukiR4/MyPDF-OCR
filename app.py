@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -180,7 +181,45 @@ def gemini_api_key() -> str:
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
 
 
-def gemini_correct_text(image_bytes: bytes, source_text: str) -> str:
+@st.cache_data(ttl=300, show_spinner=False)
+def list_gemini_models() -> list[str]:
+    """Return models available to this API key that support generateContent."""
+    api_key = gemini_api_key()
+    if not api_key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    models: list[str] = []
+    page_token = ""
+    try:
+        while True:
+            query = "?pageSize=1000"
+            if page_token:
+                query += f"&pageToken={urllib.parse.quote(page_token)}"
+            request = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models{query}",
+                headers={"x-goog-api-key": api_key},
+                method="GET",
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            for model in result.get("models", []):
+                if "generateContent" in model.get("supportedGenerationMethods", []):
+                    name = model.get("name", "")
+                    if name.startswith("models/"):
+                        name = name[7:]
+                    if name:
+                        models.append(name)
+            page_token = result.get("nextPageToken", "")
+            if not page_token:
+                break
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini ListModels HTTP {exc.code}: {detail[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"เชื่อมต่อ Gemini ListModels ไม่สำเร็จ: {exc.reason}") from exc
+    return sorted(set(models))
+
+
+def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
     """Correct Thai PDF text using the page image as the source of truth."""
     api_key = gemini_api_key()
     if not api_key:
@@ -202,7 +241,7 @@ def gemini_correct_text(image_bytes: bytes, source_text: str) -> str:
         ]}],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
     }
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
@@ -221,8 +260,8 @@ def gemini_correct_text(image_bytes: bytes, source_text: str) -> str:
         detail = exc.read().decode("utf-8", errors="replace")
         if exc.code == 404:
             raise RuntimeError(
-                f"Gemini HTTP 404: ไม่พบหรือไม่เปิดใช้โมเดล '{GEMINI_MODEL}' "
-                "กรุณาตั้ง GEMINI_MODEL ให้ตรงกับโมเดลที่บัญชีรองรับ เช่น gemini-3.8-flash"
+                f"Gemini HTTP 404: ไม่พบหรือไม่เปิดใช้โมเดล '{model}' "
+                "กรุณาเลือกโมเดลจากรายการที่ตรวจพบใน Sidebar"
             ) from exc
         raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:300]}") from exc
     except urllib.error.URLError as exc:
@@ -344,6 +383,7 @@ def extract_pdf(
     oem: str,
     engine: str,
     use_gemini_correction: bool,
+    gemini_model: str,
     progress: object,
 ) -> tuple[str, list[tuple[int, str]], dict[int, bytes]]:
     try:
@@ -379,7 +419,7 @@ def extract_pdf(
                     method = "embedded PDF text"
                     if use_gemini_correction:
                         try:
-                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number), text)
+                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number), text, gemini_model)
                             text = corrected
                             method = "Gemini corrected"
                         except Exception as exc:
@@ -395,7 +435,7 @@ def extract_pdf(
                     method = engine
                     if use_gemini_correction and text and not text.startswith("["):
                         try:
-                            text = gemini_correct_text(image_bytes, text)
+                            text = gemini_correct_text(image_bytes, text, gemini_model)
                             method = "Gemini corrected"
                         except Exception as correction_error:
                             errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
@@ -571,6 +611,27 @@ with st.sidebar:
         value=False,
         help="ใช้ข้อความเดิมร่วมกับภาพ PDF เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ โดยไม่สรุปหรือเพิ่มเนื้อหา",
     )
+    gemini_model = GEMINI_MODEL
+    if use_gemini_correction and gemini_api_key():
+        try:
+            available_gemini_models = list_gemini_models()
+            if available_gemini_models:
+                default_index = (
+                    available_gemini_models.index(GEMINI_MODEL)
+                    if GEMINI_MODEL in available_gemini_models else 0
+                )
+                gemini_model = st.selectbox(
+                    "Gemini รุ่นที่ใช้ตรวจแก้",
+                    available_gemini_models,
+                    index=default_index,
+                    help="รายการนี้มาจากโมเดลที่ API key ปัจจุบันรองรับและประกาศว่ารองรับ generateContent",
+                )
+                st.caption(f"ตรวจพบ {len(available_gemini_models)} โมเดลที่ใช้ generateContent ได้")
+            else:
+                st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
+        except Exception as exc:
+            st.error(f"ตรวจสอบ Gemini model ไม่สำเร็จ: {exc}")
+            gemini_model = st.text_input("ชื่อ Gemini model สำรอง", value=GEMINI_MODEL)
     if engine == "typhoon":
         if typhoon_api_key():
             st.success("พร้อมใช้ Typhoon OCR")
@@ -610,7 +671,7 @@ if run:
     try:
         text, errors, failed_images = extract_pdf(
             uploaded.getvalue(), language, mode, psm, oem, engine,
-            use_gemini_correction, progress,
+            use_gemini_correction, gemini_model, progress,
         )
         progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
         st.success("อ่านเอกสารสำเร็จ")
