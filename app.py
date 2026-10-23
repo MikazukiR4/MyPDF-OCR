@@ -1039,6 +1039,7 @@ if uploaded is not None:
         current_result,
         height=420,
         label_visibility="visible",
+        key="ocr-preview",
     )
 
 if run:
@@ -1052,14 +1053,18 @@ if run:
         "กำลังเตรียมผลหน้าแรก... ผลลัพธ์นี้อาจถูกตรวจแก้ใหม่เมื่ออ่านครบทั้งเอกสาร",
         height=680,
         label_visibility="visible",
+        key="ocr-live",
     )
 
     def publish_live_text(text: str) -> None:
+        # Keep the live OCR result inside a scrollable textbox while replacing
+        # the content in the same placeholder.
         live_output.text_area(
             "ตัวอย่างผลระหว่างประมวลผล",
             text,
             height=680,
             label_visibility="visible",
+            key="ocr-live",
         )
 
     try:
@@ -1075,6 +1080,7 @@ if run:
             text,
             height=680,
             label_visibility="visible",
+            key="ocr-final",
         )
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
