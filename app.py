@@ -287,6 +287,18 @@ def star_scale(score: object) -> str:
     return "★" * score + "☆" * (5 - score)
 
 
+def gemini_model_option_label(model_name: str) -> str:
+    """Show the model's quick comparison scale directly in the dropdown options."""
+    profile = gemini_model_profile(model_name)
+    return (
+        f"{model_name} | "
+        f"คุณภาพ {star_scale(profile['quality'])} · "
+        f"เร็ว {star_scale(profile['speed'])} · "
+        f"ภาพ {star_scale(profile['vision'])} · "
+        f"ประหยัด {star_scale(profile['economy'])}"
+    )
+
+
 def gemini_rating_html(label: str, score: object, description: str) -> str:
     """Render a rating row with a hover tooltip explaining the 1-5 scale."""
     return (
@@ -711,8 +723,8 @@ with st.sidebar:
                     "Gemini รุ่นที่ใช้ตรวจแก้",
                     model_names,
                     index=default_index,
-                    format_func=lambda name: f"{name} — {gemini_model_kind(name)}",
-                    help="รายการนี้มาจากโมเดลที่ API key ปัจจุบันรองรับและประกาศว่ารองรับ generateContent",
+                    format_func=gemini_model_option_label,
+                    help="เปิดรายการเพื่อเปรียบเทียบดาวของแต่ละรุ่นได้ทันที: คุณภาพ · ความเร็ว · ภาพ · ความประหยัด",
                 )
                 selected_metadata = next(model for model in available_gemini_models if model["name"] == gemini_model)
                 st.markdown("**รายละเอียดโมเดลที่เลือก**")
