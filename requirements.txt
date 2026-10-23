@@ -1,12 +1,4 @@
 streamlit
-google-genai
-websockets<16
-pypdf
-paddleocr
-paddlepaddle
 pymupdf
 pillow
-pytesseract
-python-docx
 python-dotenv
-requests

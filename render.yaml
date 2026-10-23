@@ -1,13 +1,11 @@
 services:
   - type: web
-    name: thsummarizer
+    name: thsummarizer-ocr
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng && pip install -r requirements.txt
     startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT --server.headless true
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.5
-      - key: GEMINI_API_KEY
-        sync: false

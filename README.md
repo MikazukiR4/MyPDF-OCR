@@ -1,21 +1,28 @@
-# THSummarizer
+# MyPDF-style Thai OCR
 
-ระบบ Streamlit สำหรับอ่านเอกสารราชการไทยด้วยข้อความจาก PDF, EasyOCR และ ThaiTrOCR แล้วให้ Gemini เปรียบเทียบหลักฐานและสรุปผล
+Streamlit OCR สำหรับ PDF สแกน โดยทำงานทีละหน้าแบบเดียวกับ workflow ของ MyPDF:
 
-## Run locally
+`PDF → render high-DPI image → Thai OCR → normalize Thai text → TXT`
+
+ค่าเริ่มต้นใช้ Tesseract ภาษาไทยในเครื่อง พร้อมปรับภาพความละเอียดสูงและทำความสะอาดข้อความที่เกิดจากสระ/วรรณยุกต์ลอยของเอกสารสแกน
+
+หากตั้งค่า `TYPHOON_OCR_API_KEY` ใน `.env` หรือ `.env.typhoon` จะเปิดตัวเลือก **Typhoon OCR อ่านเอกสารราชการไทยทั้งหน้า (แนะนำ)** อัตโนมัติ ซึ่งเหมาะกับเอกสารภาษาไทย ลายมือ และเลขไทยมากกว่า Tesseract แต่ภาพเอกสารจะถูกส่งไปยัง Typhoon OCR API
+
+## Local
+
+ต้องติดตั้ง Tesseract และภาษาไทยก่อน จากนั้นรัน:
 
 ```powershell
 pip install -r requirements.txt
-$env:GEMINI_API_KEY = "your-api-key"
 streamlit run app.py
 ```
 
-## Deploy on Render
+หากติดตั้ง Tesseract ไว้คนละตำแหน่ง ให้ตั้ง `TESSERACT_CMD` ใน `.env`
 
-1. เปิด Render แล้วเลือก **New → Blueprint**
-2. เลือก repository `MikazukiR4/THSummarizer`
-3. Render จะอ่านค่าใน `render.yaml`
-4. ตั้งค่า `GEMINI_API_KEY` ใน Environment ของ service
-5. กด deploy
+ตัวอย่างตัวแปรแวดล้อม:
 
-`GEMINI_API_KEY` เป็น secret ห้ามใส่ลงใน repository หรือ commit ลง Git
+```dotenv
+TESSERACT_CMD=C:\\Program Files\\Tesseract-OCR\\tesseract.exe
+TYPHOON_OCR_API_KEY=your-key
+GEMINI_API_KEY=your-key
+```

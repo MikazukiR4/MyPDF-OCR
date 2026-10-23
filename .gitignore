@@ -1,9 +1,9 @@
 .env
-.env.typhoon
-__pycache__/
-*.py[cod]
+.env.*
+!.env.example
 .venv/
-venv/
-user_data/
+__pycache__/
 .streamlit/secrets.toml
-temp_*
+*.pyc
+tessdata/
+.aider*
