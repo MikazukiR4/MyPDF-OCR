@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: thsummarizer-ocr
+    name: MyPDF OCR
     runtime: python
     plan: free
     region: singapore

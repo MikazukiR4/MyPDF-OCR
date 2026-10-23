@@ -30,8 +30,7 @@ PSM_VALUES = ["6", "3", "4"]
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-PDF_VIEWER_HTML = Path(__file__).resolve().parent / "pdf-viewer.html"
-PDF_VIEWER_APP_JS = Path(__file__).resolve().parent / "pdf-viewer-app.js"
+PDF_VIEWER_HTML = Path(__file__).resolve().parent / "embedpdf-viewer.html"
 
 
 def render_page(pdf_bytes: bytes, page_number: int) -> bytes:
@@ -288,14 +287,8 @@ def star_scale(score: object) -> str:
 
 
 def gemini_model_option_label(model_name: str) -> str:
-    """Show the model's quick comparison scale directly in the dropdown options."""
-    profile = gemini_model_profile(model_name)
-    return (
-        f"{model_name} | คุณภาพ {star_scale(profile['quality'])} · "
-        f"เร็ว {star_scale(profile['speed'])} · "
-        f"ภาพ {star_scale(profile['vision'])} · "
-        f"ประหยัด {star_scale(profile['economy'])}"
-    )
+    """Show only the model name in the dropdown options."""
+    return model_name
 
 
 def gemini_model_is_recommended(model_name: str) -> bool:
@@ -563,45 +556,13 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Embed the local single-file pdf-viewer.us viewer with the selected PDF."""
-    if not PDF_VIEWER_HTML.exists() or not PDF_VIEWER_APP_JS.exists():
+    """Embed the EmbedPDF viewer used by the Office-attendance project."""
+    if not PDF_VIEWER_HTML.exists():
         st.error("ไม่พบไฟล์ PDF viewer ในโปรเจกต์")
         return
     viewer = PDF_VIEWER_HTML.read_text(encoding="utf-8")
-    viewer_js = PDF_VIEWER_APP_JS.read_text(encoding="utf-8")
-    viewer = re.sub(r'<script[^>]+plausible[^>]+></script>', '', viewer, flags=re.I)
-    viewer = viewer.replace(
-        '<script src="/app.js"></script>',
-        f"<script>{viewer_js}</script>",
-    )
-    viewer = viewer.replace(
-        "</body>",
-        """
-        <script>
-        (() => {
-          const payload = window.__THSUMMARIZER_PDF__;
-          if (!payload) return;
-          const bytes = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
-          const file = new File([bytes], payload.name, {type: "application/pdf"});
-          const input = document.getElementById("fileInput");
-          const load = () => {
-            if (typeof window.__pdfViewerReadFile === "function") {
-              window.__pdfViewerReadFile(file);
-            } else if (input) {
-              const transfer = new DataTransfer();
-              transfer.items.add(file);
-              input.files = transfer.files;
-              input.dispatchEvent(new Event("change", {bubbles: true}));
-            }
-          };
-          if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", load, {once: true});
-          else setTimeout(load, 0);
-        })();
-        </script>
-        </body>""",
-    )
     encoded = base64.b64encode(pdf_bytes).decode("ascii")
-    config = json.dumps({"name": filename, "data": encoded}).replace("<", "\\u003c")
+    config = json.dumps({"data": encoded}).replace("<", "\\u003c")
     viewer = viewer.replace("<head>", f'<head><script>window.__THSUMMARIZER_PDF__={config};</script>', 1)
     components.html(viewer, height=height, scrolling=True)
 
@@ -712,14 +673,16 @@ with st.sidebar:
         format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
         help="มีผลหลักกับ Tesseract เท่านั้น ระบบจะใช้ข้อความฝังใน PDF ก่อนเมื่อมีอยู่แล้ว",
     )
-    psm = st.selectbox(
-        "รูปแบบหน้าเอกสาร (Tesseract)",
-        PSM_VALUES,
-        index=0,
-        format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "บล็อกข้อความ / ตาราง", "4": "คอลัมน์เดียว"}[value],
-        help="มีผลเฉพาะเมื่อเลือก Tesseract หากเลือก Typhoon หรือใช้ข้อความฝังใน PDF ตัวเลือกนี้ไม่มีผล",
-        disabled=engine != "tesseract",
-    )
+    if engine == "tesseract":
+        psm = st.selectbox(
+            "รูปแบบหน้าเอกสาร",
+            PSM_VALUES,
+            index=0,
+            format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "บล็อกข้อความ / ตาราง", "4": "คอลัมน์เดียว"}[value],
+            help="เลือกตามลักษณะการจัดวางข้อความในหน้าเอกสาร มีผลเฉพาะกับ Tesseract",
+        )
+    else:
+        psm = "6"
     oem = OEM_LSTM_ONLY
     st.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
     use_gemini_correction = st.checkbox(
@@ -788,19 +751,6 @@ with st.sidebar:
                 st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
                 st.caption("ภาพ: ระบบจะส่งภาพหน้า PDF ไปทดสอบกับโมเดลที่เลือกเมื่อเริ่มตรวจแก้")
                 st.caption(f"แสดง {len(selectable_models)} จาก {len(available_gemini_models)} โมเดลที่ใช้ได้")
-                comparison_rows = []
-                for model_info in selectable_models:
-                    model_name = str(model_info["name"])
-                    model_profile = gemini_model_profile(model_name)
-                    comparison_rows.append({
-                        "โมเดล": model_name,
-                        "คุณภาพ": star_scale(model_profile["quality"]),
-                        "เร็ว": star_scale(model_profile["speed"]),
-                        "ภาพ/PDF": star_scale(model_profile["vision"]),
-                        "ประหยัด": star_scale(model_profile["economy"]),
-                    })
-                with st.expander("เปรียบเทียบรุ่นที่แสดง", expanded=False):
-                    st.table(comparison_rows)
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
         except Exception as exc:

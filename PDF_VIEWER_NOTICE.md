@@ -1,12 +1,13 @@
 # PDF viewer third-party notices
 
-This project includes the single-file PDF viewer from:
+This project includes the EmbedPDF viewer integration based on:
 
-https://github.com/MichalAFerber/pdf-viewer.us
+https://github.com/embedpdf/embed-pdf-viewer
 
-The viewer bundles PDF.js v3.11.174 inline under the Apache License 2.0.
-The original PDF.js license banners are retained in `pdf-viewer.html`.
+The browser module is loaded from the jsDelivr package:
 
-The viewer source is adapted only to expose a local host function named
-`window.__pdfViewerReadFile` so THSummarizer can load the selected PDF in the
-embedded viewer without uploading it a second time.
+https://cdn.jsdelivr.net/npm/@embedpdf/snippet@2/dist/embedpdf.js
+
+The integration creates a temporary browser object URL from the selected PDF
+bytes and passes it to EmbedPDF. The PDF is not uploaded a second time by the
+viewer integration.
