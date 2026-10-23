@@ -1308,6 +1308,7 @@ if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != pre
     st.session_state.pop("ocr_status", None)
     st.session_state.pop("docx_bytes", None)
     st.session_state.pop("docx_result_fingerprint", None)
+    st.session_state.pop("docx_export_mode", None)
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
@@ -1328,7 +1329,10 @@ if run:
 
     def publish_ocr_preview(current_text: str) -> None:
         if current_text:
-            ocr_preview.text_area("ผล OCR", current_text, height=680)
+            # Do not recreate a Streamlit input widget for every completed page.
+            # Repeated text_area calls during one long run can cause widget-state
+            # churn and make the browser reconnect/appear to refresh.
+            ocr_preview.code(current_text, language=None)
 
     try:
         text, errors, failed_images = extract_pdf(
@@ -1339,7 +1343,7 @@ if run:
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
-        ocr_preview.text_area("ผล OCR", text, height=680)
+        ocr_preview.text_area("ผล OCR", text, height=680, key="ocr_result_editor")
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if use_gemini_correction and document_errors:
@@ -1363,11 +1367,26 @@ if run:
             editable_docx = export_pdf_editable_docx(uploaded_bytes)
             st.session_state["docx_bytes"] = editable_docx
             st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
+            st.session_state["docx_export_mode"] = "editable"
             docx_status.success("สร้างไฟล์ DOCX สำเร็จ")
         except Exception as editable_error:
-            st.session_state.pop("docx_bytes", None)
-            st.session_state.pop("docx_result_fingerprint", None)
-            docx_status.error(f"สร้าง DOCX ไม่สำเร็จ: {type(editable_error).__name__}")
+            try:
+                visual_docx = export_pdf_visual_docx(uploaded_bytes)
+                st.session_state["docx_bytes"] = visual_docx
+                st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
+                st.session_state["docx_export_mode"] = "visual"
+                docx_status.warning(
+                    "สร้าง DOCX แบบแก้ไขข้อความไม่ได้แทน เนื่องจากการจัดวางข้อความไม่สำเร็จ "
+                    f"({type(editable_error).__name__})"
+                )
+            except Exception as visual_error:
+                st.session_state.pop("docx_bytes", None)
+                st.session_state.pop("docx_result_fingerprint", None)
+                st.session_state.pop("docx_export_mode", None)
+                docx_status.error(
+                    "สร้าง DOCX ไม่สำเร็จทั้งแบบแก้ไขได้และแบบภาพ: "
+                    f"{type(visual_error).__name__}"
+                )
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
@@ -1389,9 +1408,18 @@ if run:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.session_state.pop("ocr_text", None)
         st.session_state.pop("ocr_result_fingerprint", None)
-        st.session_state.pop("docx_bytes", None)
-        st.session_state.pop("docx_result_fingerprint", None)
         st.session_state["ocr_status"] = "failed"
+        try:
+            fallback_docx = export_pdf_visual_docx(uploaded_bytes)
+            st.session_state["docx_bytes"] = fallback_docx
+            st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
+            st.session_state["docx_export_mode"] = "visual"
+            st.warning("OCR ไม่สำเร็จ แต่สร้าง DOCX แบบภาพจาก PDF ให้แล้ว เพื่อให้ยังดาวน์โหลดเอกสารได้")
+        except Exception as docx_error:
+            st.session_state.pop("docx_bytes", None)
+            st.session_state.pop("docx_result_fingerprint", None)
+            st.session_state.pop("docx_export_mode", None)
+            st.error(f"สร้าง DOCX สำรองไม่สำเร็จ: {type(docx_error).__name__}: {docx_error}")
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
@@ -1401,18 +1429,32 @@ if (
     and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
     and st.session_state.get("ocr_text")
 ):
-    ocr_preview.text_area("ผล OCR", st.session_state["ocr_text"], height=680)
+    ocr_preview.text_area(
+        "ผล OCR",
+        st.session_state["ocr_text"],
+        height=680,
+        key="ocr_result_editor",
+    )
 
 if (
     uploaded is not None
     and st.session_state.get("docx_result_fingerprint") == uploaded_fingerprint
     and st.session_state.get("docx_bytes")
 ):
+    docx_export_mode = st.session_state.get("docx_export_mode", "editable")
     st.download_button(
-        "⬇️ ดาวน์โหลด DOCX\nตัดบรรทัดตามต้นฉบับ",
+        "⬇️ ดาวน์โหลด DOCX" if docx_export_mode == "editable" else "⬇️ ดาวน์โหลด DOCX (แบบภาพ)",
         data=st.session_state["docx_bytes"],
-        file_name=f"{Path(uploaded.name).stem}-editable.docx",
+        file_name=(
+            f"{Path(uploaded.name).stem}-editable.docx"
+            if docx_export_mode == "editable"
+            else f"{Path(uploaded.name).stem}-visual.docx"
+        ),
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        help="ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก",
+        help=(
+            "ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก"
+            if docx_export_mode == "editable"
+            else "ไฟล์ Word แบบภาพ รักษาหน้าตา PDF ต้นฉบับ แม้ OCR จะผิดพลาด"
+        ),
         use_container_width=True,
     )
