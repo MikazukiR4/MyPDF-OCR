@@ -136,6 +136,21 @@ def typhoon_api_key() -> str:
     return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
 
 
+def available_ocr_engines() -> list[str]:
+    """Return only OCR engines that can actually run in this deployment."""
+    engines = ["tesseract"]
+    if typhoon_api_key():
+        engines.insert(0, "typhoon")
+    return engines
+
+
+def usable_ocr_engine(engine: str) -> str:
+    """Prevent stale UI/session state from selecting Typhoon without a key."""
+    if engine == "typhoon" and not typhoon_api_key():
+        return "tesseract"
+    return engine if engine in available_ocr_engines() else "tesseract"
+
+
 def typhoon_transcribe(image_bytes: bytes) -> str:
     """Use Typhoon OCR for Thai government documents and handwriting."""
     api_key = typhoon_api_key()
@@ -486,6 +501,7 @@ def extract_pdf(
     except ImportError:
         import fitz
 
+    engine = usable_ocr_engine(engine)
     if len(pdf_bytes) > MAX_FILE_BYTES:
         raise ValueError("ไฟล์ใหญ่เกิน 50 MB")
 
@@ -666,17 +682,21 @@ st.markdown('<div class="subtitle">อ่านข้อความจาก PD
 with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
     st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
-    available_engines = ["typhoon", "tesseract"]
-    default_engine = "typhoon" if typhoon_api_key() else "tesseract"
+    available_engines = available_ocr_engines()
+    default_engine = available_engines[0]
     engine = st.radio(
         "เครื่องมืออ่านเอกสาร",
         available_engines,
         index=available_engines.index(default_engine),
+        key="ocr_engine",
         format_func=lambda value: {
             "typhoon": "Typhoon OCR — แนะนำสำหรับเอกสารไทย",
             "tesseract": "Tesseract — อ่านในเครื่อง / Offline",
         }[value],
     )
+    engine = usable_ocr_engine(engine)
+    if not typhoon_api_key():
+        st.info("ไม่มี Typhoon API key — ระบบใช้ Tesseract อัตโนมัติ")
     language = st.selectbox(
         "ภาษา",
         ["tha+eng", "tha", "eng"],
