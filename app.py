@@ -1,6 +1,5 @@
 import io
 import base64
-import csv
 import json
 import os
 import re
@@ -22,31 +21,10 @@ MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_PAGES = 100
 TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 
-# Tesseract OCR Engine Modes (equivalent to tesseract.js OEM constants).
-OEM_TESSERACT_ONLY = "0"
 OEM_LSTM_ONLY = "1"
-OEM_TESSERACT_LSTM_COMBINED = "2"
-OEM_DEFAULT = "3"
 
 PSM_VALUES = ["6", "3", "4"]
-PSM_LABELS = {
-    "0": "OSD_ONLY",
-    "1": "AUTO_OSD",
-    "2": "AUTO_ONLY",
-    "3": "AUTO — เอกสารทั่วไป",
-    "4": "SINGLE_COLUMN",
-    "5": "SINGLE_BLOCK_VERT_TEXT",
-    "6": "SINGLE_BLOCK — ใบเสร็จ/ตาราง",
-    "7": "SINGLE_LINE",
-    "8": "SINGLE_WORD",
-    "9": "CIRCLE_WORD",
-    "10": "SINGLE_CHAR",
-    "11": "SPARSE_TEXT",
-    "12": "SPARSE_TEXT_OSD",
-    "13": "RAW_LINE",
-}
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
 
@@ -183,265 +161,6 @@ def typhoon_transcribe(image_bytes: bytes) -> str:
         raise RuntimeError("Typhoon OCR ไม่ส่งข้อความกลับมา") from exc
 
 
-def gemini_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-
-
-def gemini_transcribe(image_bytes: bytes) -> str:
-    """Transcribe a page with Gemini Vision without storing the API key in code."""
-    api_key = gemini_api_key()
-    if not api_key:
-        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY ในไฟล์ .env")
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": (
-                    "ถอดข้อความภาษาไทยจากภาพเอกสารนี้ตามต้นฉบับ ห้ามสรุป "
-                    "ห้ามเดาหรือแต่งเติม ถ้าอักขระใดอ่านไม่ชัดให้ใส่ [อ่านไม่ออก] "
-                    "และถ้าไม่แน่ใจให้ใส่ [ไม่แน่ใจ] ตรงตำแหน่งนั้น "
-                    "รักษาการขึ้นบรรทัดใหม่และตัวเลขให้มากที่สุด"
-                )},
-                {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
-            ],
-        }],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096},
-    }
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Gemini Vision HTTP {exc.code}: {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"เชื่อมต่อ Gemini Vision ไม่สำเร็จ: {exc.reason}") from exc
-    try:
-        return "\n".join(
-            part["text"]
-            for part in result["candidates"][0]["content"]["parts"]
-            if part.get("text")
-        ).strip()
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Gemini Vision ไม่ส่งข้อความกลับมา: {result}") from exc
-
-
-def mark_gemini_uncertainty(text: str) -> str:
-    markers = ("[อ่านไม่ออก]", "[ไม่แน่ใจ]", "อ่านไม่ออก", "ไม่แน่ใจ", "ไม่สามารถอ่าน")
-    if any(marker in text for marker in markers):
-        return f"⚠️ [Gemini ไม่แน่ใจ] {text}"
-    return text
-
-
-def safe_gemini_transcribe(image_bytes: bytes) -> str:
-    try:
-        return gemini_transcribe(image_bytes)
-    except Exception:
-        try:
-            return typhoon_transcribe(image_bytes)
-        except Exception:
-            return ""
-
-
-def safe_gemini_find_handwriting_regions(image_bytes: bytes) -> list[tuple[float, float, float, float]]:
-    try:
-        return gemini_find_handwriting_regions(image_bytes)
-    except Exception:
-        return []
-
-
-def gemini_find_handwriting_regions(image_bytes: bytes) -> list[tuple[float, float, float, float]]:
-    """Return normalized [top, left, bottom, right] boxes for handwriting."""
-    api_key = gemini_api_key()
-    if not api_key:
-        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY ในไฟล์ .env")
-    prompt = (
-        "ตรวจหาบริเวณที่เป็นลายมือไทยในภาพนี้เท่านั้น ไม่ต้องอ่านตัวพิมพ์ "
-        "ตอบเป็น JSON array เท่านั้น รูปแบบ [{\"top\":0.1,\"left\":0.2,"
-        "\"bottom\":0.4,\"right\":0.9}] โดยค่าทั้งหมดเป็นสัดส่วน 0 ถึง 1 "
-        "ถ้าไม่พบลายมือให้ตอบ []"
-    )
-    payload = {"contents": [{"parts": [
-        {"text": prompt},
-        {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
-    ]}], "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}}
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
-    request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        raw = result["candidates"][0]["content"]["parts"][0]["text"]
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        boxes = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Gemini ตรวจหาลายมือไม่สำเร็จ: {exc}") from exc
-    regions = []
-    for box in boxes if isinstance(boxes, list) else []:
-        try:
-            top, left = max(0.0, float(box["top"])), max(0.0, float(box["left"]))
-            bottom, right = min(1.0, float(box["bottom"])), min(1.0, float(box["right"]))
-            if bottom > top and right > left:
-                regions.append((top, left, bottom, right))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return regions
-
-
-def detect_colored_ink_regions(image_bytes: bytes) -> list[tuple[float, float, float, float]]:
-    """Find separated blue-ink bands before asking Gemini to read them."""
-    from PIL import Image
-
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    pixels = image.load()
-    row_hits = []
-    for y in range(image.height):
-        hits = 0
-        for x in range(image.width):
-            red, green, blue = pixels[x, y]
-            if blue > 85 and blue - red > 25 and blue - green > 8:
-                hits += 1
-        if hits >= max(2, image.width // 700):
-            row_hits.append(y)
-    if not row_hits:
-        return []
-
-    bands = []
-    start = previous = row_hits[0]
-    for row in row_hits[1:]:
-        if row - previous > max(12, image.height // 180):
-            bands.append((start, previous))
-            start = row
-        previous = row
-    bands.append((start, previous))
-
-    regions = []
-    pad_y = max(12, image.height // 120)
-    pad_x = max(12, image.width // 120)
-    for top, bottom in bands:
-        xs = []
-        for y in range(top, bottom + 1):
-            for x in range(image.width):
-                red, green, blue = pixels[x, y]
-                if blue > 85 and blue - red > 25 and blue - green > 8:
-                    xs.append(x)
-        if not xs:
-            continue
-        left = max(0, min(xs) - pad_x)
-        right = min(image.width, max(xs) + pad_x)
-        top_px = max(0, top - pad_y)
-        bottom_px = min(image.height, bottom + pad_y)
-        if top_px > image.height * 0.96 or bottom_px < image.height * 0.04:
-            continue
-        regions.append((top_px / image.height, left / image.width, bottom_px / image.height, right / image.width))
-    return regions
-
-
-def merge_regions(*region_groups: list[tuple[float, float, float, float]]) -> list[tuple[float, float, float, float]]:
-    """Merge overlapping detector results while keeping separate handwriting zones."""
-    merged: list[tuple[float, float, float, float]] = []
-    for group in region_groups:
-        for candidate in group:
-            top, left, bottom, right = candidate
-            duplicate = False
-            for old_top, old_left, old_bottom, old_right in merged:
-                overlap_top = max(top, old_top)
-                overlap_left = max(left, old_left)
-                overlap_bottom = min(bottom, old_bottom)
-                overlap_right = min(right, old_right)
-                overlap = max(0.0, overlap_bottom - overlap_top) * max(0.0, overlap_right - overlap_left)
-                candidate_area = max(0.001, (bottom - top) * (right - left))
-                if overlap / candidate_area > 0.45:
-                    duplicate = True
-                    break
-            if not duplicate:
-                merged.append(candidate)
-    return merged
-
-
-def crop_regions(image_bytes: bytes, regions: list[tuple[float, float, float, float]]) -> list[bytes]:
-    from PIL import Image
-
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    crops = []
-    for top, left, bottom, right in regions:
-        box = (round(left * image.width), round(top * image.height), round(right * image.width), round(bottom * image.height))
-        crop = image.crop(box)
-        output = io.BytesIO()
-        crop.save(output, format="PNG")
-        crops.append(output.getvalue())
-    return crops
-
-
-def replace_handwriting_regions(
-    tsv_text: str,
-    image_bytes: bytes,
-    regions: list[tuple[float, float, float, float]],
-    replacements: list[str],
-) -> str:
-    """Rebuild Tesseract lines while replacing tokens inside handwriting boxes."""
-    from PIL import Image
-
-    image = Image.open(io.BytesIO(image_bytes))
-    rows = []
-    for row in csv.DictReader(tsv_text.splitlines(), delimiter="\t"):
-        if row.get("level") != "5" or not row.get("text", "").strip():
-            continue
-        try:
-            rows.append({**row, "left": int(row["left"]), "top": int(row["top"]), "width": int(row["width"]), "height": int(row["height"])})
-        except (KeyError, ValueError):
-            continue
-    groups = {}
-    for row in rows:
-        key = (row.get("block_num"), row.get("par_num"), row.get("line_num"))
-        groups.setdefault(key, []).append(row)
-    ordered_lines = sorted(groups.values(), key=lambda line: min(item["top"] for item in line))
-    # A detected region is not enough to replace text.  Gemini may fail, return
-    # an empty response, or return only an uncertainty marker.  In all of
-    # those cases the original Tesseract tokens must remain untouched.
-    usable = {
-        index: replacement.strip()
-        for index, replacement in enumerate(replacements)
-        if replacement and replacement.strip()
-    }
-    used = set()
-    output_lines = []
-    for line in ordered_lines:
-        line.sort(key=lambda item: item["left"])
-        parts = []
-        for token in line:
-            token_box = (
-                token["top"] / image.height,
-                token["left"] / image.width,
-                (token["top"] + token["height"]) / image.height,
-                (token["left"] + token["width"]) / image.width,
-            )
-            matching = []
-            for index, region in enumerate(regions):
-                overlap = max(0.0, min(token_box[2], region[2]) - max(token_box[0], region[0])) * max(0.0, min(token_box[3], region[3]) - max(token_box[1], region[1]))
-                if overlap > 0:
-                    matching.append(index)
-            matching_usable = [index for index in matching if index in usable]
-            if matching_usable:
-                for index in matching_usable:
-                    if index not in used:
-                        parts.append(usable[index])
-                        used.add(index)
-                # Only suppress the Tesseract token when a replacement was
-                # actually obtained.  Failed Gemini crops never delete text.
-                continue
-            parts.append(token["text"])
-        if parts:
-            output_lines.append(" ".join(parts))
-
-    for index, replacement in usable.items():
-        if index not in used:
-            output_lines.append(replacement)
-    return "\n".join(output_lines).strip()
 
 
 def tesseract_path() -> str | None:
@@ -539,22 +258,6 @@ class TesseractWorker:
             raise RuntimeError("OCR worker ถูกปิดไปแล้ว")
         return _extract_page_text_once(image_bytes, self.language, self.mode, self.psm, self.oem)
 
-    def recognize_tsv(self, image_bytes: bytes) -> str:
-        if self.closed:
-            raise RuntimeError("OCR worker ถูกปิดไปแล้ว")
-        prepared = preprocess_image(image_bytes, self.mode)
-        with tempfile.TemporaryDirectory(prefix="th_ocr_tsv_") as temp_dir:
-            image_path = Path(temp_dir) / "page.png"
-            image_path.write_bytes(prepared)
-            args = [self.command, str(image_path), "stdout", "-l", self.language, "--psm", self.psm, "--oem", self.oem, "tsv"]
-            if (TESSDATA_DIR / "tha.traineddata").exists() and (TESSDATA_DIR / "eng.traineddata").exists():
-                args.extend(["--tessdata-dir", str(TESSDATA_DIR)])
-            result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, check=False)
-        if result.returncode != 0:
-            error = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"Tesseract TSV ทำงานไม่สำเร็จ: {error}")
-        return result.stdout.decode("utf-8", errors="replace")
-
     def terminate(self) -> None:
         self.closed = True
 
@@ -565,9 +268,7 @@ def extract_pdf(
     mode: str,
     psm: str,
     oem: str,
-    use_gemini: bool,
-    auto_crop_handwriting: bool,
-    use_typhoon: bool,
+    engine: str,
     progress: object,
 ) -> tuple[str, list[tuple[int, str]], dict[int, bytes]]:
     try:
@@ -589,57 +290,27 @@ def extract_pdf(
         output: list[str] = []
         errors: list[tuple[int, str]] = []
         failed_images: dict[int, bytes] = {}
-        worker = None if use_typhoon else TesseractWorker(language, mode, psm, oem)
-        for page_number in range(1, page_count + 1):
-            ratio = (page_number - 1) / page_count
-            progress.progress(ratio, text=f"กำลังอ่านหน้า {page_number}/{page_count} ({round(ratio * 100)}%)")
-            image_bytes = render_page(pdf_bytes, page_number)
-            try:
-                base_text = typhoon_transcribe(image_bytes) if use_typhoon else worker.recognize(image_bytes)
-                if (auto_crop_handwriting or use_gemini) and not use_typhoon:
-                    colored_regions = detect_colored_ink_regions(image_bytes)
-                    semantic_regions = safe_gemini_find_handwriting_regions(image_bytes)
-                    regions = merge_regions(colored_regions, semantic_regions)
-                    crops = crop_regions(image_bytes, regions)
-                    replacements = [mark_gemini_uncertainty(safe_gemini_transcribe(crop)) for crop in crops]
-                    text = replace_handwriting_regions(
-                        worker.recognize_tsv(image_bytes), image_bytes, regions, replacements
-                    )
-                    usable_replacements = [replacement for replacement in replacements if replacement.strip()]
-                    # Keep the complete Tesseract page when Gemini could not
-                    # produce a usable crop result.  Gemini must never replace
-                    # a readable page with an empty or partial response.
-                    text = text if usable_replacements else base_text
-                    if usable_replacements:
-                        text += (
-                            f"\n\n[Gemini: แทนที่เฉพาะบริเวณลายมือ "
-                            f"{len(usable_replacements)} จุด; กรุณาตรวจสอบตัวเลข/คำที่มี ⚠️]"
-                        )
-                    elif regions:
-                        text = (
-                            base_text
-                            + "\n\n[Gemini: พบบริเวณที่อาจเป็นลายมือ แต่ยังอ่านไม่สำเร็จ "
-                            "จึงคงผล Tesseract เดิมไว้]"
-                        )
-                    else:
-                        text = base_text + "\n\n[Gemini: ไม่พบบริเวณลายมือ จึงใช้ Tesseract ทั้งหน้า]"
-                    if not text:
-                        text = "[ไม่พบบริเวณลายมือในหน้านี้]"
-                else:
-                    text = base_text
-                output.append(f"----- หน้า {page_number} -----\n{text}")
-            except Exception as exc:
-                errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-                failed_images[page_number] = image_bytes
-                output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
-            ratio = page_number / page_count
-            progress.progress(ratio, text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว ({round(ratio * 100)}%)")
-        if worker is not None:
-            worker.terminate()
+        worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
+        try:
+            for page_number in range(1, page_count + 1):
+                ratio = (page_number - 1) / page_count
+                progress.progress(ratio, text=f"กำลังอ่านหน้า {page_number}/{page_count}")
+                image_bytes = render_page(pdf_bytes, page_number)
+                try:
+                    text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
+                    output.append(f"----- หน้า {page_number} -----\n{text or '[ไม่พบข้อความ]'}")
+                except Exception as exc:
+                    errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+                    failed_images[page_number] = image_bytes
+                    output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                ratio = page_number / page_count
+                progress.progress(ratio, text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว")
+        finally:
+            if worker is not None:
+                worker.terminate()
         return "\n\n".join(output), errors, failed_images
     finally:
         document.close()
-
 
 def inject_css() -> None:
     st.markdown(
@@ -719,75 +390,62 @@ st.markdown('<div class="subtitle">อ่านข้อความจาก PD
 
 with st.sidebar:
     st.header("ตั้งค่า OCR")
+    engine = st.radio(
+        "เครื่องมืออ่านเอกสาร",
+        ["typhoon", "tesseract"],
+        format_func=lambda value: {
+            "typhoon": "Typhoon OCR — แนะนำสำหรับเอกสารไทย",
+            "tesseract": "Tesseract — อ่านในเครื่อง / Offline",
+        }[value],
+    )
     language = st.selectbox(
-        "ภาษาในเอกสาร",
+        "ภาษา",
         ["tha", "tha+eng", "eng"],
-        format_func=lambda value: {"tha+eng": "ไทย + อังกฤษ", "tha": "ไทย", "eng": "อังกฤษ"}[value],
+        format_func=lambda value: {"tha": "ไทย", "tha+eng": "ไทย + อังกฤษ", "eng": "อังกฤษ"}[value],
     )
     mode = st.selectbox(
-        "ความแม่นยำ",
+        "คุณภาพภาพ",
         ["best", "fast"],
-        format_func=lambda value: "แม่นยำสูง (ช้ากว่าเล็กน้อย)" if value == "best" else "เร็ว (แม่นยำน้อยกว่า)",
+        format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
     )
     psm = st.selectbox(
         "รูปแบบเอกสาร",
         PSM_VALUES,
-        format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "ใบเสร็จ / ตาราง", "4": "คอลัมน์เดียว"}[value],
+        index=0,
+        format_func=lambda value: {"3": "เอกสารทั่วไป", "6": "บล็อกข้อความ / ตาราง", "4": "คอลัมน์เดียว"}[value],
     )
-    oem = st.selectbox(
-        "โหมด OCR (OEM)",
-        [OEM_LSTM_ONLY, OEM_DEFAULT, OEM_TESSERACT_LSTM_COMBINED, OEM_TESSERACT_ONLY],
-        format_func=lambda value: {
-            OEM_LSTM_ONLY: "LSTM_ONLY — แนะนำสำหรับภาษาไทย",
-            OEM_DEFAULT: "DEFAULT",
-            OEM_TESSERACT_LSTM_COMBINED: "TESSERACT_LSTM_COMBINED",
-            OEM_TESSERACT_ONLY: "TESSERACT_ONLY — รุ่นเก่า",
-        }[value],
-    )
-    use_gemini = st.checkbox(
-        "ใช้ Gemini Vision อ่านลายมือไทย (แม่นขึ้น แต่อาจช้ากว่าและใช้โควตา)",
-        value=False,
-    )
-    use_typhoon = st.checkbox(
-        "ใช้ Typhoon OCR อ่านเอกสารราชการไทยทั้งหน้า (แนะนำ)",
-        value=bool(typhoon_api_key()),
-    )
-    auto_crop_handwriting = st.checkbox(
-        "ให้ Gemini หาและ crop เฉพาะบริเวณลายมืออัตโนมัติ",
-        value=False,
-        disabled=not use_gemini or use_typhoon,
-    )
-    if use_typhoon and not typhoon_api_key():
-        st.warning("ยังไม่ได้ตั้งค่า TYPHOON_OCR_API_KEY ในไฟล์ .env หรือ .env.typhoon")
-    elif use_typhoon:
-        st.caption("Typhoon OCR จะส่งภาพแต่ละหน้าไปยังบริการภายนอกเพื่ออ่านข้อความ")
-    if use_gemini and not gemini_api_key():
-        st.warning("ยังไม่ได้ตั้งค่า GEMINI_API_KEY ในไฟล์ .env")
-    if tesseract_path():
-        st.success("พบ Tesseract แล้ว")
+    oem = OEM_LSTM_ONLY
+    if engine == "typhoon":
+        if typhoon_api_key():
+            st.success("พร้อมใช้ Typhoon OCR")
+            st.caption("ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
+        else:
+            st.error("ไม่พบ TYPHOON_OCR_API_KEY")
+    elif tesseract_path():
+        st.success("พร้อมใช้ Tesseract ในเครื่อง")
     else:
-        st.warning("ยังไม่พบ Tesseract")
+        st.error("ไม่พบ Tesseract")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
 st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
-uploaded = st.file_uploader("ลากไฟล์มาวางที่นี่ หรือเลือกไฟล์ PDF", type=["pdf"])
+uploaded = st.file_uploader("เลือกไฟล์ PDF เพื่อเริ่มต้น", type=["pdf"], accept_multiple_files=False)
 if uploaded is not None:
-    st.caption(f"ไฟล์ที่เลือก: {uploaded.name} ({uploaded.size / 1024:.1f} KB)")
-run = st.button("🔍 เริ่ม OCR", type="primary", use_container_width=True, disabled=uploaded is None)
+    st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
+    run = st.button("🔍 เริ่ม OCR", type="primary", use_container_width=True)
+else:
+    st.info("อัปโหลดไฟล์ PDF แล้วปุ่มเริ่ม OCR จะปรากฏที่นี่")
+    run = False
 st.markdown('</div>', unsafe_allow_html=True)
 
 if run and uploaded is not None:
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
     try:
         text, errors, failed_images = extract_pdf(
-            uploaded.getvalue(), language, mode, psm, oem, use_gemini,
-            auto_crop_handwriting, use_typhoon, progress,
+            uploaded.getvalue(), language, mode, psm, oem, engine, progress,
         )
         progress.progress(1.0, text="OCR เสร็จสมบูรณ์ (100%)")
         st.success("อ่านเอกสารสำเร็จ")
         st.text_area("ข้อความที่อ่านได้", text, height=520)
-        if "⚠️ [Gemini ไม่แน่ใจ]" in text:
-            st.warning("ผลลัพธ์มีส่วนที่ Gemini ระบุว่าไม่แน่ใจ กรุณาตรวจสอบกับภาพต้นฉบับ")
         stem = Path(uploaded.name).stem
         st.download_button(
             "⬇️ ดาวน์โหลดข้อความเป็น .txt",

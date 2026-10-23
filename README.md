@@ -24,5 +24,4 @@ streamlit run app.py
 ```dotenv
 TESSERACT_CMD=C:\\Program Files\\Tesseract-OCR\\tesseract.exe
 TYPHOON_OCR_API_KEY=your-key
-GEMINI_API_KEY=your-key
 ```
