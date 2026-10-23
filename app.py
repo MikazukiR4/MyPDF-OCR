@@ -1252,36 +1252,8 @@ with st.sidebar:
                     format_func=gemini_model_option_label,
                     help="ค่าเริ่มต้นจะแสดงเฉพาะรุ่นที่เหมาะกับการตรวจแก้ข้อความและภาพ PDF",
                 )
-                selected_metadata = next(model for model in selectable_models if model["name"] == gemini_model)
-                st.markdown("**รุ่นที่เลือก**")
-                st.caption(str(selected_metadata["description"]))
-                st.caption(f"ประเภท: {gemini_model_kind(gemini_model)}")
-                st.caption(
-                    f"รับเข้าได้: {format_token_limit(selected_metadata['input_token_limit'])} · "
-                    f"ตอบกลับได้: {format_token_limit(selected_metadata['output_token_limit'])}"
-                )
                 profile = gemini_model_profile(gemini_model)
-                st.markdown("**คะแนนโดยประมาณสำหรับงานตรวจแก้ OCR**")
-                st.markdown(
-                    gemini_rating_html("คุณภาพการแก้ข้อความ", profile["quality"], "1 ดาว = ต่ำ, 3 ดาว = ปานกลาง, 5 ดาว = สูง"),
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    gemini_rating_html("ความเร็ว", profile["speed"], "1 ดาว = ช้า, 3 ดาว = ปานกลาง, 5 ดาว = เร็วมาก"),
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    gemini_rating_html("ความเข้าใจภาพ/PDF", profile["vision"], "1 ดาว = จำกัด, 3 ดาว = ปานกลาง, 5 ดาว = เหมาะกับภาพมาก"),
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    gemini_rating_html("ความประหยัดโดยประมาณ", profile["economy"], "1 ดาว = ใช้ทรัพยากรมาก, 3 ดาว = ปานกลาง, 5 ดาว = ประหยัดมาก"),
-                    unsafe_allow_html=True,
-                )
                 st.info(f"เหมาะกับ: {profile['best_for']}")
-                st.caption("คะแนนดาวเป็นคำแนะนำโดยประมาณจากตระกูลโมเดล ไม่ใช่คะแนนทางการของ Google และราคา/โควตาจริงขึ้นกับบัญชีของคุณ")
-                st.caption("PDF: เมื่อเริ่มตรวจแก้ ระบบจะส่ง PDF ต้นฉบับและข้อความ OCR ทั้งเอกสารไปยังโมเดลที่เลือกในคำขอเดียว")
-                st.caption(f"แสดง {len(selectable_models)} จาก {len(available_gemini_models)} โมเดลที่ใช้ได้")
             else:
                 st.error("ไม่พบ Gemini model ที่รองรับ generateContent")
         except Exception as exc:
