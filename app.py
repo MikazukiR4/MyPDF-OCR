@@ -1,5 +1,6 @@
 import io
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -22,6 +23,7 @@ load_dotenv(".env.typhoon", override=False)
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_PAGES = 100
+GEMINI_MAX_WORKERS = 3
 TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 
 OEM_LSTM_ONLY = "1"
@@ -547,55 +549,78 @@ def extract_pdf(
                 page_callback("\n\n".join(output))
 
         try:
-            for page_number in range(1, page_count + 1):
-                ratio = (page_number - 1) / page_count
-                progress.progress(ratio, text=f"กำลังอ่านหน้า {page_number}/{page_count}")
-                page = document[page_number - 1]
-                embedded = embedded_pdf_text(page)
-                # Born-digital PDFs already contain selectable text. Prefer it
-                # over image OCR to avoid corrupting Thai text and wasting API calls.
-                if len(embedded) >= 80:
-                    text = embedded
-                    method = "embedded PDF text"
-                    if use_gemini_correction:
-                        try:
-                            corrected = gemini_correct_text(render_page(pdf_bytes, page_number, mode), text, gemini_model)
-                            text = corrected
-                            method = "Gemini corrected"
-                        except Exception as exc:
-                            errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {exc}"))
-                    output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
-                    publish_page()
-                    ratio = page_number / page_count
-                    progress.progress(ratio, text=f"อ่านข้อความฝังหน้า {page_number}/{page_count} เสร็จแล้ว")
-                    continue
-                image_bytes = render_page(pdf_bytes, page_number, mode)
-                try:
-                    text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
-                    text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
-                    method = engine
-                    if use_gemini_correction and text and not text.startswith("["):
-                        try:
-                            text = gemini_correct_text(image_bytes, text, gemini_model)
-                            method = "Gemini corrected"
-                        except Exception as correction_error:
-                            errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
-                    output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
-                    publish_page()
-                except Exception as exc:
-                    fallback = embedded_pdf_text(document[page_number - 1])
-                    if fallback:
-                        output.append(
-                            f"----- หน้า {page_number} | embedded PDF text -----\n{fallback}"
+            # Process small batches so Gemini calls overlap while completed
+            # pages are still published incrementally in document order.
+            batch_size = GEMINI_MAX_WORKERS if use_gemini_correction else 1
+            for batch_start in range(1, page_count + 1, batch_size):
+                batch_end = min(page_count, batch_start + batch_size - 1)
+                page_data: dict[int, tuple[str, str, bytes | None]] = {}
+                gemini_jobs: dict[int, tuple[bytes, str]] = {}
+                for page_number in range(batch_start, batch_end + 1):
+                    ratio = (page_number - 1) / page_count
+                    progress.progress(ratio * 0.5, text=f"กำลังเตรียมหน้า {page_number}/{page_count}")
+                    page = document[page_number - 1]
+                    embedded = embedded_pdf_text(page)
+                    # Born-digital PDFs already contain selectable text. Prefer it
+                    # over image OCR to avoid corrupting Thai text and wasting API calls.
+                    if len(embedded) >= 80:
+                        text = embedded
+                        image_bytes = render_page(pdf_bytes, page_number, mode) if use_gemini_correction else None
+                        page_data[page_number] = (text, "embedded PDF text", image_bytes)
+                        if image_bytes is not None:
+                            gemini_jobs[page_number] = (image_bytes, text)
+                        continue
+                    image_bytes = render_page(pdf_bytes, page_number, mode)
+                    try:
+                        text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
+                        text = text or embedded_pdf_text(document[page_number - 1]) or "[ไม่พบข้อความ]"
+                        page_data[page_number] = (text, engine, image_bytes)
+                        if use_gemini_correction and text and not text.startswith("["):
+                            gemini_jobs[page_number] = (image_bytes, text)
+                    except Exception as exc:
+                        fallback = embedded_pdf_text(document[page_number - 1])
+                        if fallback:
+                            page_data[page_number] = (fallback, "embedded PDF text", image_bytes)
+                        else:
+                            errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+                            failed_images[page_number] = image_bytes
+
+                futures = {}
+                if gemini_jobs:
+                    with ThreadPoolExecutor(max_workers=min(GEMINI_MAX_WORKERS, len(gemini_jobs))) as executor:
+                        for page_number, (image_bytes, source_text) in gemini_jobs.items():
+                            futures[page_number] = executor.submit(
+                                gemini_correct_text, image_bytes, source_text, gemini_model
+                            )
+                        for page_number in range(batch_start, batch_end + 1):
+                            if page_number not in page_data:
+                                output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                            else:
+                                text, method, _ = page_data[page_number]
+                                if page_number in futures:
+                                    try:
+                                        text = futures[page_number].result()
+                                        method = "Gemini corrected"
+                                    except Exception as correction_error:
+                                        errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
+                                output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                            progress.progress(
+                                0.5 + (page_number / page_count) * 0.5,
+                                text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
+                            )
+                            publish_page()
+                else:
+                    for page_number in range(batch_start, batch_end + 1):
+                        if page_number not in page_data:
+                            output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                        else:
+                            text, method, _ = page_data[page_number]
+                            output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                        progress.progress(
+                            0.5 + (page_number / page_count) * 0.5,
+                            text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
                         )
                         publish_page()
-                    else:
-                        errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-                        failed_images[page_number] = image_bytes
-                        output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
-                        publish_page()
-                ratio = page_number / page_count
-                progress.progress(ratio, text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว")
         finally:
             if worker is not None:
                 worker.terminate()
