@@ -1,4 +1,4 @@
-streamlit
+streamlit[pdf]
 pymupdf
 pillow
 python-dotenv

@@ -1,6 +1,8 @@
 # PDF viewer implementation note
 
 MyOCR PDF uses Streamlit's built-in `st.pdf` element for the uploaded PDF.
+The `streamlit[pdf]` extra is required because it installs the `streamlit-pdf`
+component used by that element.
 The application passes the original PDF bytes directly to Streamlit instead of
 embedding them in nested `data:` URLs or loading a third-party JavaScript CDN.
 This avoids browser iframe size limits and external-script failures in deployed
