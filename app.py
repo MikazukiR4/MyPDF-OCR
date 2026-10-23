@@ -120,6 +120,17 @@ def clean_thai_ocr_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def embedded_pdf_text(page: object) -> str:
+    """Read an existing PDF text layer before falling back to image OCR."""
+    try:
+        raw = page.get_text("text") or ""
+    except Exception:
+        return ""
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip()
+
+
 def typhoon_api_key() -> str:
     return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
 
@@ -298,14 +309,29 @@ def extract_pdf(
             for page_number in range(1, page_count + 1):
                 ratio = (page_number - 1) / page_count
                 progress.progress(ratio, text=f"กำลังอ่านหน้า {page_number}/{page_count}")
+                page = document[page_number - 1]
+                embedded = embedded_pdf_text(page)
+                # Born-digital PDFs already contain selectable text. Prefer it
+                # over image OCR to avoid corrupting Thai text and wasting API calls.
+                if len(embedded) >= 80:
+                    output.append(f"----- หน้า {page_number} | embedded PDF text -----\n{embedded}")
+                    ratio = page_number / page_count
+                    progress.progress(ratio, text=f"อ่านข้อความฝังหน้า {page_number}/{page_count} เสร็จแล้ว")
+                    continue
                 image_bytes = render_page(pdf_bytes, page_number)
                 try:
                     text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
-                    output.append(f"----- หน้า {page_number} -----\n{text or '[ไม่พบข้อความ]'}")
+                    output.append(f"----- หน้า {page_number} -----\n{text or embedded_pdf_text(document[page_number - 1]) or '[ไม่พบข้อความ]'}")
                 except Exception as exc:
-                    errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-                    failed_images[page_number] = image_bytes
-                    output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
+                    fallback = embedded_pdf_text(document[page_number - 1])
+                    if fallback:
+                        output.append(
+                            f"----- หน้า {page_number} | embedded PDF text -----\n{fallback}"
+                        )
+                    else:
+                        errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+                        failed_images[page_number] = image_bytes
+                        output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
                 ratio = page_number / page_count
                 progress.progress(ratio, text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว")
         finally:
