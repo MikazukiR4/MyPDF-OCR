@@ -928,8 +928,15 @@ def extract_pdf(
                 batch_end = min(page_count, batch_start + batch_size - 1)
                 page_images: dict[int, bytes] = {}
                 for page_number in range(batch_start, batch_end + 1):
-                    ratio = (page_number - 1) / page_count
-                    progress.progress(ratio * 0.5, text=f"กำลังเตรียมหน้า {page_number}/{page_count}")
+                    # Rendering happens before OCR for each batch. Keep the
+                    # displayed value at the current completed-page position
+                    # instead of calculating from page_number, which would make
+                    # the bar move backwards when the next batch starts.
+                    render_ratio = (batch_start - 1) / page_count
+                    progress.progress(
+                        0.3 + render_ratio * 0.45 if batch_start > 1 else 0.0,
+                        text=f"กำลังเตรียมหน้า {page_number}/{page_count}",
+                    )
                     page_images[page_number] = render_page(document, page_number, mode)
 
                 def recognize_page(page_number: int) -> tuple[int, str, str, bytes]:
@@ -991,7 +998,7 @@ def extract_pdf(
                         text, method, _ = page_data[page_number]
                         output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
                     progress.progress(
-                        0.5 + (page_number / page_count) * 0.5,
+                        0.3 + (page_number / page_count) * 0.45,
                         text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
                     )
                     publish_page()
@@ -1001,7 +1008,7 @@ def extract_pdf(
 
         local_output = "\n\n".join(output)
         if gemini_document_mode and local_output:
-            progress.progress(0.85, text="กำลังส่ง PDF ทั้งเอกสารให้ Gemini ตรวจแก้")
+            progress.progress(0.8, text="กำลังส่ง PDF ทั้งเอกสารให้ Gemini ตรวจแก้")
             try:
                 corrected_document = gemini_correct_document(pdf_bytes, local_output, gemini_model)
                 progress.progress(0.98, text="ตรวจสอบลำดับและ marker หน้าแล้ว")
