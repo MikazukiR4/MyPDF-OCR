@@ -1191,6 +1191,7 @@ with st.sidebar:
     mode = st.selectbox(
         "การประมวลผลภาพสำหรับ OCR",
         ["best", "fast"],
+        index=1,
         format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
         help="มีผลกับ Tesseract เท่านั้น ระบบจะอ่านข้อความจากภาพเพื่อหลีกเลี่ยง text layer ของ PDF ที่อาจถอดภาษาไทยผิด",
     )
@@ -1210,10 +1211,12 @@ with st.sidebar:
         # Reset a stale browser/session value so a previous checked state
         # cannot enable a provider that is unavailable in this deployment.
         st.session_state["use_gemini_correction"] = False
+    elif "use_gemini_correction" not in st.session_state:
+        st.session_state["use_gemini_correction"] = True
     st.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
     use_gemini_correction = st.checkbox(
         "ใช้ Gemini ตรวจแก้สระและวรรณยุกต์",
-        value=False,
+        value=True,
         key="use_gemini_correction",
         disabled=not gemini_key_available,
         help="Gemini จะใช้ภาพ PDF ร่วมกับข้อความที่อ่านได้ เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ",
