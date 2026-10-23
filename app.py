@@ -43,9 +43,14 @@ def render_page(pdf_bytes: bytes, page_number: int, mode: str = "best") -> bytes
     document = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         page = document[page_number - 1]
+        if mode == "fast":
+            # 150 DPI is sufficient for the fast OCR path and avoids rendering
+            # unnecessarily large images before preprocessing.
+            pixmap = page.get_pixmap(dpi=150, alpha=False)
+            return pixmap.tobytes("png")
         width = max(1, page.rect.width)
-        target_width = 1500 if mode == "fast" else 2400
-        minimum_scale = 1.5 if mode == "fast" else 2.5
+        target_width = 2400
+        minimum_scale = 2.5
         scale = min(4.2, max(minimum_scale, target_width / width))
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
         return pixmap.tobytes("png")
