@@ -1288,6 +1288,8 @@ previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
 if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
     st.session_state.pop("ocr_text", None)
     st.session_state.pop("ocr_status", None)
+    st.session_state.pop("docx_bytes", None)
+    st.session_state.pop("docx_result_fingerprint", None)
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
@@ -1298,20 +1300,28 @@ if uploaded is not None:
         st.caption("เปิดเพื่อเทียบกับข้อความ OCR — PDF จะไม่แสดงค้างบนหน้าหลัก")
         render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
 
+ocr_preview = st.empty()
+
 if run:
     if uploaded is None:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
 
+    def publish_ocr_preview(current_text: str) -> None:
+        if current_text:
+            ocr_preview.text_area("ผล OCR", current_text, height=680)
+
     try:
         text, errors, failed_images = extract_pdf(
             uploaded_bytes, language, mode, psm, oem, engine,
             use_gemini_correction, gemini_model, progress,
+            page_callback=publish_ocr_preview,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+        ocr_preview.text_area("ผล OCR", text, height=680)
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if use_gemini_correction and document_errors:
@@ -1329,18 +1339,17 @@ if run:
         st.session_state["ocr_status"] = result_status
         stem = Path(uploaded.name).stem
         st.markdown("### ดาวน์โหลดผลลัพธ์")
+        docx_status = st.empty()
+        docx_status.info("กำลังสร้างไฟล์ DOCX...")
         try:
             editable_docx = export_pdf_editable_docx(uploaded_bytes)
-            st.download_button(
-                "⬇️ ดาวน์โหลด DOCX\nตัดบรรทัดตามต้นฉบับ",
-                data=editable_docx,
-                file_name=f"{stem}-editable.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                help="ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก",
-                use_container_width=True,
-            )
+            st.session_state["docx_bytes"] = editable_docx
+            st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
+            docx_status.success("สร้างไฟล์ DOCX สำเร็จ")
         except Exception as editable_error:
-            st.caption(f"สร้าง DOCX ไม่สำเร็จ: {type(editable_error).__name__}")
+            st.session_state.pop("docx_bytes", None)
+            st.session_state.pop("docx_result_fingerprint", None)
+            docx_status.error(f"สร้าง DOCX ไม่สำเร็จ: {type(editable_error).__name__}")
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
@@ -1362,19 +1371,30 @@ if run:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.session_state.pop("ocr_text", None)
         st.session_state.pop("ocr_result_fingerprint", None)
+        st.session_state.pop("docx_bytes", None)
+        st.session_state.pop("docx_result_fingerprint", None)
         st.session_state["ocr_status"] = "failed"
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
 if (
-    uploaded is not None
+    not run
+    and uploaded is not None
     and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
     and st.session_state.get("ocr_text")
 ):
-    st.text_area(
-        "ผล OCR",
-        st.session_state["ocr_text"],
-        height=680,
-        label_visibility="visible",
-        key="ocr-final",
+    ocr_preview.text_area("ผล OCR", st.session_state["ocr_text"], height=680)
+
+if (
+    uploaded is not None
+    and st.session_state.get("docx_result_fingerprint") == uploaded_fingerprint
+    and st.session_state.get("docx_bytes")
+):
+    st.download_button(
+        "⬇️ ดาวน์โหลด DOCX\nตัดบรรทัดตามต้นฉบับ",
+        data=st.session_state["docx_bytes"],
+        file_name=f"{Path(uploaded.name).stem}-editable.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        help="ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก",
+        use_container_width=True,
     )
