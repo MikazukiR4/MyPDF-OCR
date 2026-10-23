@@ -720,14 +720,21 @@ with st.sidebar:
     else:
         psm = "6"
     oem = OEM_LSTM_ONLY
+    gemini_key_available = bool(gemini_api_key())
+    if not gemini_key_available:
+        # Reset a stale browser/session value so a previous checked state
+        # cannot enable a provider that is unavailable in this deployment.
+        st.session_state["use_gemini_correction"] = False
     st.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
     use_gemini_correction = st.checkbox(
         "ใช้ Gemini ตรวจแก้สระและวรรณยุกต์",
         value=False,
+        key="use_gemini_correction",
+        disabled=not gemini_key_available,
         help="Gemini จะใช้ภาพ PDF ร่วมกับข้อความที่อ่านได้ เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ",
     )
     gemini_model = GEMINI_MODEL
-    if use_gemini_correction and gemini_api_key():
+    if use_gemini_correction and gemini_key_available:
         try:
             available_gemini_models = list_gemini_models()
             if available_gemini_models:
@@ -803,10 +810,9 @@ with st.sidebar:
     else:
         st.error("ไม่พบ Tesseract")
     if use_gemini_correction:
-        if gemini_api_key():
-            st.warning("Gemini จะตรวจทีละหน้า โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
-        else:
-            st.error("ไม่พบ GEMINI_API_KEY")
+        st.warning("Gemini จะตรวจทีละหน้า โดยส่งภาพและข้อความไปยัง Google Gemini อาจใช้โควตา API และไม่ควรใช้กับเอกสารลับหากไม่ได้รับอนุญาต")
+    elif not gemini_key_available:
+        st.info("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ปิดการตรวจแก้ Gemini ไว้ และจะอ่านเอกสารด้วย OCR ตามปกติ")
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
 st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
@@ -848,13 +854,15 @@ if run:
             with st.expander(f"หน้าที่อ่านไม่สำเร็จ ({len(errors)})"):
                 for page_number, error in errors:
                     st.error(f"หน้า {page_number}: {error}")
-                    st.download_button(
-                        f"ดาวน์โหลดภาพหน้า {page_number}",
-                        data=failed_images[page_number],
-                        file_name=f"{stem}-page-{page_number}-failed.png",
-                        mime="image/png",
-                        key=f"failed-{page_number}",
-                    )
+                    failed_image = failed_images.get(page_number)
+                    if failed_image is not None:
+                        st.download_button(
+                            f"ดาวน์โหลดภาพหน้า {page_number}",
+                            data=failed_image,
+                            file_name=f"{stem}-page-{page_number}-failed.png",
+                            mime="image/png",
+                            key=f"failed-{page_number}",
+                        )
     except Exception as exc:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.error(f"OCR ไม่สำเร็จ: {type(exc).__name__}: {exc}")
