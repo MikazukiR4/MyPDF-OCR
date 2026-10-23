@@ -319,8 +319,9 @@ def inject_css() -> None:
         :root { --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#dc2626; --accent-dark:#991b1b; --navy:#172554; }
         html, body, button, input, textarea, select { font-family:"Segoe UI", "Noto Sans Thai", Tahoma, sans-serif !important; }
         .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
-        header[data-testid="stHeader"] { background: #ffffff !important; }
-        .block-container { max-width: 900px; padding-top: 2rem; }
+        header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
+        [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
+        .block-container { max-width: 900px; padding-top: 3.5rem; }
         .mypdf-header { display:flex; align-items:center; gap:12px; margin-bottom:2rem; }
         .mypdf-icon { background:var(--accent); color:#fff; border-radius:9px; padding:9px 12px; font-size:24px; box-shadow:0 4px 10px rgba(220,38,38,.2); }
         .mypdf-name { font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.3px; }
@@ -331,9 +332,9 @@ def inject_css() -> None:
         div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#ffffff !important; color:#172033 !important; }
         div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#334155 !important; }
         div[data-testid="stProgressBar"] > div { background:#e2e8f0 !important; }
-        div[data-testid="stProgressBar"] > div > div { background:#e5322d !important; }
+        div[data-testid="stButton"] > button { background:#dc2626 !important; color:#ffffff !important; border:1px solid #991b1b !important; border-radius:8px !important; font-weight:700
         div[data-testid="stButton"] > button { background:#1e293b !important; color:#ffffff !important; border:1px solid #0f172a !important; border-radius:8px !important; font-weight:700 !important; }
-        div[data-testid="stButton"] > button:hover { background:#334155 !important; color:#ffffff !important; border-color:#334155 !important; }
+        div[data-testid="stButton"] > button:hover { background:#b91c1c !important; color:#ffffff !important; border-color:#991b1b !important; }
         div[data-testid="stButton"] > button[kind="primary"], button[kind="primary"] { background:var(--accent) !important; color:#ffffff !important; border-color:var(--accent-dark) !important; box-shadow:0 4px 10px rgba(220,38,38,.18); }
         div[data-testid="stButton"] > button[kind="primary"]:hover, button[kind="primary"]:hover { background:var(--accent-dark) !important; color:#ffffff !important; }
         div[data-testid="stFileUploader"] button { background:#334155 !important; color:#ffffff !important; border:1px solid #1e293b !important; border-radius:7px !important; }
@@ -428,16 +429,23 @@ with st.sidebar:
     st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
 st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
-uploaded = st.file_uploader("เลือกไฟล์ PDF เพื่อเริ่มต้น", type=["pdf"], accept_multiple_files=False)
+uploaded = st.file_uploader(
+    "เลือกไฟล์ PDF เพื่อเริ่มต้น",
+    type=["pdf"],
+    accept_multiple_files=False,
+    help="รองรับเฉพาะไฟล์ .pdf เท่านั้น หากมีไฟล์ Word ให้บันทึกเป็น PDF ก่อน",
+)
 if uploaded is not None:
     st.success(f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB")
-    run = st.button("🔍 เริ่ม OCR", type="primary", use_container_width=True)
 else:
-    st.info("อัปโหลดไฟล์ PDF แล้วปุ่มเริ่ม OCR จะปรากฏที่นี่")
-    run = False
+    st.info("ยังไม่ได้เลือกไฟล์ PDF — ปุ่มด้านล่างจะแจ้งเตือนให้เลือกไฟล์")
+run = st.button("🔍 เริ่ม OCR", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-if run and uploaded is not None:
+if run:
+    if uploaded is None:
+        st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
+        st.stop()
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
     try:
         text, errors, failed_images = extract_pdf(
