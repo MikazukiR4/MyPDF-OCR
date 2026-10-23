@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 
@@ -725,24 +726,56 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
-    """Show a PDF with Streamlit's native viewer and always provide a download fallback.
-
-    Passing PDF bytes directly to ``st.pdf`` avoids nested data URLs, which can
-    become too large or behave inconsistently in deployed browser iframes.
-    """
+    """Show a PDF viewer with built-in fit, zoom-in, and zoom-out controls."""
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
     display_name = filename or "document.pdf"
-    try:
-        st.pdf(
-            pdf_bytes,
-            height=height,
-            alt=f"ตัวอย่าง PDF: {display_name}",
-        )
-    except Exception as exc:
-        st.warning(f"ตัวแสดง PDF ในเบราว์เซอร์ไม่พร้อมใช้งาน: {exc}")
-        st.info("ยังสามารถดาวน์โหลด PDF ต้นฉบับเพื่อเปิดด้วยโปรแกรมอ่าน PDF ได้")
+    encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+    safe_name = json.dumps(display_name, ensure_ascii=False)
+    viewer_html = f"""
+    <!doctype html>
+    <html lang="th">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          html, body, #pdf-viewer {{ width:100%; height:100%; min-height:620px; margin:0; }}
+          body {{ overflow:hidden; background:#172554; }}
+          #viewer-error {{ padding:1rem; color:#fecaca; font:14px sans-serif; }}
+        </style>
+      </head>
+      <body>
+        <div id="pdf-viewer" aria-label="ตัวอย่าง PDF: {safe_name}"></div>
+        <div id="viewer-error" role="alert" hidden></div>
+        <script type="module">
+          import EmbedPDF from "https://cdn.jsdelivr.net/npm/@embedpdf/snippet@2/dist/embedpdf.js";
+          const payload = {{ data: "{encoded_pdf}" }};
+          const target = document.getElementById("pdf-viewer");
+          const errorTarget = document.getElementById("viewer-error");
+          function showError(message) {{
+            errorTarget.textContent = message;
+            errorTarget.hidden = false;
+          }}
+          try {{
+            const binary = atob(payload.data);
+            const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+            const blob = new Blob([bytes], {{type:"application/pdf"}});
+            const pdfUrl = URL.createObjectURL(blob);
+            EmbedPDF.init({{
+              type: "container",
+              target,
+              src: pdfUrl,
+              theme: {{ preference: "system" }}
+            }});
+          }} catch (error) {{
+            showError(`เปิดตัวอย่าง PDF ไม่สำเร็จ: ${{error.message}}`);
+          }}
+        </script>
+      </body>
+    </html>
+    """
+    components.html(viewer_html, height=height, scrolling=False)
     st.download_button(
         "ดาวน์โหลด PDF ต้นฉบับ",
         data=pdf_bytes,
