@@ -146,6 +146,15 @@ def export_pdf_editable_docx(pdf_bytes: bytes, ocr_text: str = "") -> tuple[byte
     )
 
 
+@st.cache_data(show_spinner=False)
+def export_pdf_flowing_docx(ocr_text: str = "") -> bytes:
+    """Clean, flowing Thai DOCX with proper typography, tables, and page breaks."""
+    from docx_generator import create_flowing_docx
+
+    return create_flowing_docx(ocr_text)
+
+
+
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
     """Convert to clean grayscale, upscale only if small, and suppress dotted-line/scan noise."""
     from PIL import Image, ImageFilter, ImageOps
@@ -1178,43 +1187,6 @@ if run:
             st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง")
         st.session_state["ocr_status"] = result_status
         stem = Path(uploaded.name).stem
-        st.markdown("### ดาวน์โหลดผลลัพธ์")
-        docx_status = st.empty()
-        docx_status.info("กำลังสร้างไฟล์ DOCX...")
-        try:
-            editable_docx, docx_report = export_pdf_editable_docx(uploaded_bytes, text)
-            st.session_state["docx_bytes"] = editable_docx
-            st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
-            st.session_state["docx_export_mode"] = "editable"
-            docx_status.success("สร้างไฟล์ DOCX สำเร็จ")
-            for docx_warning in docx_report.get("warnings", []):
-                st.warning(docx_warning)
-            report_pages = [item for item in docx_report.get("pages", []) if "ref_lines" in item]
-            total_lines = sum(item.get("boxes", 0) for item in report_pages)
-            used_lines = sum(item.get("matched", 0) + item.get("rescued", 0) for item in report_pages)
-            if total_lines:
-                st.caption(
-                    f"ใช้ข้อความที่ตรวจแก้แล้ว {used_lines}/{total_lines} บรรทัด · "
-                    "บรรทัดที่เหลือใช้ข้อความจาก PDF/OCR เดิม"
-                )
-        except Exception as editable_error:
-            try:
-                visual_docx = export_pdf_visual_docx(uploaded_bytes)
-                st.session_state["docx_bytes"] = visual_docx
-                st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
-                st.session_state["docx_export_mode"] = "visual"
-                docx_status.warning(
-                    "สร้าง DOCX แบบแก้ไขข้อความไม่ได้แทน เนื่องจากการจัดวางข้อความไม่สำเร็จ "
-                    f"({type(editable_error).__name__})"
-                )
-            except Exception as visual_error:
-                st.session_state.pop("docx_bytes", None)
-                st.session_state.pop("docx_result_fingerprint", None)
-                st.session_state.pop("docx_export_mode", None)
-                docx_status.error(
-                    "สร้าง DOCX ไม่สำเร็จทั้งแบบแก้ไขได้และแบบภาพ: "
-                    f"{type(visual_error).__name__}"
-                )
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
                 for _, error in document_errors:
@@ -1237,17 +1209,6 @@ if run:
         st.session_state.pop("ocr_text", None)
         st.session_state.pop("ocr_result_fingerprint", None)
         st.session_state["ocr_status"] = "failed"
-        try:
-            fallback_docx = export_pdf_visual_docx(uploaded_bytes)
-            st.session_state["docx_bytes"] = fallback_docx
-            st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
-            st.session_state["docx_export_mode"] = "visual"
-            st.warning("OCR ไม่สำเร็จ แต่สร้าง DOCX แบบภาพจาก PDF ให้แล้ว เพื่อให้ยังดาวน์โหลดเอกสารได้")
-        except Exception as docx_error:
-            st.session_state.pop("docx_bytes", None)
-            st.session_state.pop("docx_result_fingerprint", None)
-            st.session_state.pop("docx_export_mode", None)
-            st.error(f"สร้าง DOCX สำรองไม่สำเร็จ: {type(docx_error).__name__}: {docx_error}")
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
@@ -1266,23 +1227,61 @@ if (
 
 if (
     uploaded is not None
-    and st.session_state.get("docx_result_fingerprint") == uploaded_fingerprint
-    and st.session_state.get("docx_bytes")
+    and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
+    and st.session_state.get("ocr_text")
 ):
-    docx_export_mode = st.session_state.get("docx_export_mode", "editable")
-    st.download_button(
-        "⬇️ ดาวน์โหลด DOCX" if docx_export_mode == "editable" else "⬇️ ดาวน์โหลด DOCX (แบบภาพ)",
-        data=st.session_state["docx_bytes"],
-        file_name=(
-            f"{Path(uploaded.name).stem}-editable.docx"
-            if docx_export_mode == "editable"
-            else f"{Path(uploaded.name).stem}-visual.docx"
-        ),
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        help=(
-            "ไฟล์ Word แก้ไขได้ โดยรักษาการแบ่งบรรทัดตาม PDF/OCR ต้นฉบับเป็นหลัก"
-            if docx_export_mode == "editable"
-            else "ไฟล์ Word แบบภาพ รักษาหน้าตา PDF ต้นฉบับ แม้ OCR จะผิดพลาด"
-        ),
-        use_container_width=True,
-    )
+    st.markdown("---")
+    st.markdown("### 📥 ดาวน์โหลดผลลัพธ์ (DOCX)")
+
+    current_ocr_text = st.session_state.get("ocr_result_editor") or st.session_state.get("ocr_text", "")
+    stem = Path(uploaded.name).stem
+
+    col_mode, col_btn = st.columns([3, 2], gap="medium")
+    with col_mode:
+        selected_mode = st.radio(
+            "เลือกรูปแบบไฟล์ DOCX:",
+            options=[
+                "📄 จัดรูปเล่มอัตโนมัติ (Flowing — สระไม่ตก ไม่ตัด สวยงาม แนะนำสำหรับภาษาไทย)",
+                "📐 จัดวางตามพิกัดหน้าเดิม (Layered Layout — วางกล่องข้อความตามพิกัด PDF)",
+                "🖼️ ภาพต้นฉบับ (Visual — ความคมชัดสูง รักษาหน้าตาเดิม 100%)",
+            ],
+            index=0,
+            key="docx_download_mode_radio",
+            help="สามารถแก้ไขข้อความในกล่อง 'ผล OCR' ด้านบน แล้วดาวน์โหลดตามข้อความที่แก้ไขได้ทันที",
+        )
+
+    with col_btn:
+        st.write("")
+        st.write("")
+        target_docx_bytes = None
+        target_filename = ""
+        target_help = ""
+
+        with st.spinner("กำลังเตรียมไฟล์ DOCX..."):
+            try:
+                if selected_mode.startswith("📄"):
+                    target_docx_bytes = export_pdf_flowing_docx(current_ocr_text)
+                    target_filename = f"{stem}-flowing.docx"
+                    target_help = "ไฟล์ Word จัดรูปเล่มอัตโนมัติ ใช้ฟอนต์ TH Sarabun New สระและวรรณยุกต์ครบถ้วน ไม่มั่ว แก้ไขง่าย"
+                elif selected_mode.startswith("📐"):
+                    target_docx_bytes, report = export_pdf_editable_docx(uploaded_bytes, current_ocr_text)
+                    target_filename = f"{stem}-layered.docx"
+                    target_help = "ไฟล์ Word อิงพิกัดเดิม มีภาพพื้นหลังและกล่องข้อความลอยตามตำแหน่งเดิม"
+                else:
+                    target_docx_bytes = export_pdf_visual_docx(uploaded_bytes)
+                    target_filename = f"{stem}-visual.docx"
+                    target_help = "ไฟล์ Word แบบรูปภาพ รักษาหน้าตา PDF เดิมทุกประการ"
+            except Exception as export_err:
+                st.error(f"เกิดข้อผิดพลาดในการสร้าง DOCX: {type(export_err).__name__}: {export_err}")
+
+        if target_docx_bytes:
+            st.download_button(
+                "⬇️ ดาวน์โหลดไฟล์ DOCX",
+                data=target_docx_bytes,
+                file_name=target_filename,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                help=target_help,
+                use_container_width=True,
+                type="primary",
+            )
+            st.caption(f"ขนาดไฟล์: {len(target_docx_bytes) / 1024:.1f} KB (อัปเดตตามข้อความล่าสุด)")

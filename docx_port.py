@@ -535,14 +535,16 @@ class DocxBuilder:
         if not text:
             return
         scale_w = 100
+        has_thai = bool(THAI_RE.search(text))
         if self.measurer is not None:
             measured = self.measurer.length(text, size)
             if box.original and measured > box.w * k * 1.4:
-                text = box.original.strip() or text      # corrected text would overflow the box
-                measured = self.measurer.length(text, size)
+                if not text_layer_is_corrupt(box.original):
+                    text = box.original.strip() or text      # only revert if original text was clean
+                    measured = self.measurer.length(text, size)
             if measured > box.w * k * 1.02 > 0:
                 scale_w = int(min(100, max(50, round(box.w * k / measured * 100))))
-        shape_h = size * 1.5
+        shape_h = size * (1.85 if has_thai else 1.5)
         cy = (box.y + box.h / 2.0) * k
         top = cy - shape_h / 2.0 + self.y_adjust * size
         left, width = box.x * k, box.w * k * 1.04 + 3.0
@@ -563,7 +565,7 @@ class DocxBuilder:
             'mso-wrap-style:none;v-text-anchor:top">'
             '<v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr>'
             '<w:wordWrap w:val="0"/><w:snapToGrid w:val="0"/>'
-            f'<w:spacing w:before="0" w:after="0" w:line="{round(shape_h * 20)}" w:lineRule="exact"/>'
+            f'<w:spacing w:before="0" w:after="0" w:line="{round(shape_h * 20)}" w:lineRule="atLeast"/>'
             f'</w:pPr><w:r><w:rPr>{rpr}</w:rPr>'
             f'<w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p></w:txbxContent></v:textbox>'
             '</v:rect></w:pict></w:r>')
