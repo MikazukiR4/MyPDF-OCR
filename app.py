@@ -128,7 +128,11 @@ def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
 
 
 @st.cache_data(show_spinner=False)
-def export_pdf_editable_docx(pdf_bytes: bytes, ocr_text: str = "") -> tuple[bytes, dict]:
+def export_pdf_editable_docx(
+    pdf_bytes: bytes,
+    ocr_text: str = "",
+    page_numbers: tuple[int, ...] | None = None,
+) -> tuple[bytes, dict]:
     """Layered, editable DOCX (see docx_port.py): page picture behind real Word text boxes.
 
     ocr_text is the final text shown in the app (Typhoon / Gemini / Tesseract) with its
@@ -140,6 +144,7 @@ def export_pdf_editable_docx(pdf_bytes: bytes, ocr_text: str = "") -> tuple[byte
     return build_editable_docx(
         pdf_bytes,
         ocr_text,
+        page_numbers=list(page_numbers) if page_numbers else None,
         tesseract_cmd=tesseract_path(),
         tessdata_dir=TESSDATA_DIR,
         font_dir=Path(__file__).resolve().parent / "fonts",
@@ -693,6 +698,28 @@ class TesseractWorker:
         self.closed = True
 
 
+def parse_page_range(range_str: str, max_pages: int) -> list[int]:
+    """Parse string like '1-3, 5, 8-10' into sorted list of unique 1-indexed page numbers."""
+    if not range_str or not range_str.strip():
+        return list(range(1, max_pages + 1))
+    pages = set()
+    parts = [p.strip() for p in range_str.split(",") if p.strip()]
+    for part in parts:
+        if "-" in part:
+            sub = part.split("-")
+            if len(sub) == 2 and sub[0].strip().isdigit() and sub[1].strip().isdigit():
+                start = max(1, int(sub[0].strip()))
+                end = min(max_pages, int(sub[1].strip()))
+                if start <= end:
+                    pages.update(range(start, end + 1))
+        elif part.isdigit():
+            val = int(part)
+            if 1 <= val <= max_pages:
+                pages.add(val)
+    res = sorted(pages)
+    return res if res else list(range(1, max_pages + 1))
+
+
 def extract_pdf(
     pdf_bytes: bytes,
     language: str,
@@ -704,6 +731,7 @@ def extract_pdf(
     gemini_model: str,
     progress: object,
     page_callback: object | None = None,
+    pages_to_process: list[int] | None = None,
 ) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
     try:
         import pymupdf as fitz
@@ -722,6 +750,15 @@ def extract_pdf(
         if page_count > MAX_PAGES:
             raise ValueError(f"เอกสารมี {page_count} หน้า เกินขีดจำกัด {MAX_PAGES} หน้า")
 
+        if pages_to_process:
+            target_pages = [p for p in pages_to_process if 1 <= p <= page_count]
+        else:
+            target_pages = list(range(1, page_count + 1))
+
+        if not target_pages:
+            raise ValueError("ไม่พบหน้าที่ระบุในเอกสาร PDF")
+
+        total_target = len(target_pages)
         output: list[str] = []
         errors: list[tuple[int | None, str]] = []
         failed_images: dict[int, bytes] = {}
@@ -733,23 +770,15 @@ def extract_pdf(
                 page_callback("\n\n".join(output))
 
         try:
-            # Render pages in the main thread because a PyMuPDF document should
-            # not be shared between worker threads. OCR itself is independent
-            # per page, so bounded parallelism significantly reduces total time
-            # without changing output order or line breaks.
             batch_size = max(1, OCR_MAX_WORKERS)
-            for batch_start in range(1, page_count + 1, batch_size):
-                batch_end = min(page_count, batch_start + batch_size - 1)
+            for batch_start_idx in range(0, total_target, batch_size):
+                current_batch = target_pages[batch_start_idx : batch_start_idx + batch_size]
                 page_images: dict[int, bytes] = {}
-                for page_number in range(batch_start, batch_end + 1):
-                    # Rendering happens before OCR for each batch. Keep the
-                    # displayed value at the current completed-page position
-                    # instead of calculating from page_number, which would make
-                    # the bar move backwards when the next batch starts.
-                    render_ratio = (batch_start - 1) / page_count
+                for idx_in_batch, page_number in enumerate(current_batch):
+                    render_ratio = (batch_start_idx + idx_in_batch) / total_target
                     progress.progress(
-                        0.3 + render_ratio * 0.45 if batch_start > 1 else 0.0,
-                        text=f"กำลังเตรียมหน้า {page_number}/{page_count}",
+                        0.1 + render_ratio * 0.45,
+                        text=f"กำลังเตรียมหน้า {page_number} ({batch_start_idx + idx_in_batch + 1}/{total_target})",
                     )
                     page_images[page_number] = render_page(document, page_number, mode)
 
@@ -770,7 +799,7 @@ def extract_pdf(
                         page_number: executor.submit(recognize_page, page_number)
                         for page_number in page_images
                     }
-                    for page_number in range(batch_start, batch_end + 1):
+                    for page_number in current_batch:
                         try:
                             _, text, method, image_bytes = futures[page_number].result()
                             page_data[page_number] = (text, method, image_bytes)
@@ -796,7 +825,7 @@ def extract_pdf(
                             )
                             for page_number, (image_bytes, source_text) in gemini_jobs.items()
                         }
-                        for page_number in range(batch_start, batch_end + 1):
+                        for page_number in current_batch:
                             if page_number in gemini_futures:
                                 try:
                                     corrected_text = gemini_futures[page_number].result()
@@ -805,15 +834,16 @@ def extract_pdf(
                                 except Exception as correction_error:
                                     errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
 
-                for page_number in range(batch_start, batch_end + 1):
+                for idx_in_batch, page_number in enumerate(current_batch):
                     if page_number not in page_data:
                         output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
                     else:
                         text, method, _ = page_data[page_number]
                         output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
+                    done_count = batch_start_idx + idx_in_batch + 1
                     progress.progress(
-                        0.3 + (page_number / page_count) * 0.45,
-                        text=f"อ่านหน้า {page_number}/{page_count} เสร็จแล้ว",
+                        0.1 + (done_count / total_target) * 0.55,
+                        text=f"อ่านหน้า {page_number} เสร็จแล้ว ({done_count}/{total_target})",
                     )
                     publish_page()
         finally:
@@ -822,9 +852,18 @@ def extract_pdf(
 
         local_output = "\n\n".join(output)
         if gemini_document_mode and local_output:
-            progress.progress(0.8, text="กำลังส่ง PDF ทั้งเอกสารให้ Gemini ตรวจแก้")
+            progress.progress(0.75, text="กำลังส่ง PDF ให้ Gemini ตรวจแก้...")
             try:
-                corrected_document = gemini_correct_document(pdf_bytes, local_output, gemini_model)
+                if len(target_pages) < page_count:
+                    sub_doc = fitz.open()
+                    for p in target_pages:
+                        sub_doc.insert_pdf(document, from_page=p - 1, to_page=p - 1)
+                    target_pdf_bytes = sub_doc.tobytes()
+                    sub_doc.close()
+                else:
+                    target_pdf_bytes = pdf_bytes
+
+                corrected_document = gemini_correct_document(target_pdf_bytes, local_output, gemini_model)
                 progress.progress(0.98, text="ตรวจสอบลำดับและ marker หน้าแล้ว")
                 return corrected_document, errors, failed_images
             except Exception as correction_error:
@@ -1007,6 +1046,7 @@ with st.sidebar:
     if not available_engines:
         st.error("ยังไม่พบ OCR engine: ติดตั้ง Tesseract พร้อมภาษาไทย หรือกำหนด TYPHOON_OCR_API_KEY")
         st.stop()
+        available_engines = ["tesseract"]
     default_engine = available_engines[0]
     engine = st.radio(
         "เครื่องมืออ่านเอกสาร",
@@ -1130,9 +1170,76 @@ if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != pre
     st.session_state.pop("docx_bytes", None)
     st.session_state.pop("docx_result_fingerprint", None)
     st.session_state.pop("docx_export_mode", None)
+    st.session_state.pop("target_pages_processed", None)
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+
+total_doc_pages = 0
+if uploaded_bytes:
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
+    try:
+        _temp_doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
+        total_doc_pages = _temp_doc.page_count
+        _temp_doc.close()
+    except Exception:
+        total_doc_pages = 0
+
+target_pages_to_process = None
+effective_use_gemini = use_gemini_correction
+effective_engine = engine
+
+if uploaded is not None and total_doc_pages > 0:
+    st.markdown("##### ⚙️ ตั้งค่าก่อนเริ่มอ่านเอกสาร (ควบคุมและประหยัด Token)")
+    cfg_col1, cfg_col2 = st.columns([1, 1], gap="medium")
+    with cfg_col1:
+        st.markdown("**1. เป้าหมายการแปลงไฟล์**")
+        processing_goal = st.radio(
+            "เลือกเป้าหมายการประมวลผล:",
+            options=[
+                "🟢 เอกสารคุณภาพสูง (ใช้ AI ตรวจแก้ / จัดรูปเล่มสวยงาม)",
+                "🟡 ประหยัด Token 100% (ใช้ Tesseract OCR ในเครื่อง - ฟรี)",
+            ],
+            index=0 if gemini_key_available else 1,
+            key="processing_goal_radio",
+            help="หากเลือกแบบประหยัด Token ระบบจะปิดการเรียก Gemini/Typhoon ชั่วคราวและอ่านด้วย OCR ออฟไลน์ในเครื่อง 100%",
+        )
+        if processing_goal.startswith("🟡"):
+            effective_use_gemini = False
+            effective_engine = "tesseract"
+        else:
+            effective_use_gemini = use_gemini_correction
+            effective_engine = engine
+
+    with cfg_col2:
+        st.markdown(f"**2. เลือกช่วงหน้า (พบทั้งหมด {total_doc_pages} หน้า)**")
+        page_selection_mode = st.radio(
+            "หน้าที่ต้องการอ่าน:",
+            options=["ทุกหน้าในเอกสาร", "ระบุช่วงหน้าเอง (Custom Range)"],
+            index=0,
+            horizontal=True,
+            key="page_selection_mode_radio",
+        )
+        if page_selection_mode == "ระบุช่วงหน้าเอง (Custom Range)":
+            custom_range_str = st.text_input(
+                "ระบุหน้า (เช่น 1-3, 5):",
+                value=f"1-{min(total_doc_pages, 3)}",
+                key="custom_page_range_input",
+                help=f"กรอกหมายเลขหน้าระหว่าง 1 ถึง {total_doc_pages} คั่นด้วยเครื่องหมายจุลภาค (,) หรือยัติภังค์ (-)",
+            )
+            target_pages_to_process = parse_page_range(custom_range_str, total_doc_pages)
+            saved_percent = round((1.0 - len(target_pages_to_process) / total_doc_pages) * 100)
+            if saved_percent > 0:
+                st.caption(f"⚡ จะประมวลผล {len(target_pages_to_process)} จาก {total_doc_pages} หน้า (ประหยัด Token ไปได้ ~{saved_percent}%)")
+            else:
+                st.caption(f"จะประมวลผลทั้งหมด {len(target_pages_to_process)} หน้า")
+        else:
+            target_pages_to_process = list(range(1, total_doc_pages + 1))
+            st.caption(f"จะประมวลผลครบทั้ง {total_doc_pages} หน้า")
+
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 
 if uploaded is not None:
@@ -1156,35 +1263,34 @@ if run:
 
     def publish_ocr_preview(current_text: str) -> None:
         if current_text:
-            # Do not recreate a Streamlit input widget for every completed page.
-            # Repeated text_area calls during one long run can cause widget-state
-            # churn and make the browser reconnect/appear to refresh.
             ocr_preview.code(current_text, language=None)
 
     try:
         text, errors, failed_images = extract_pdf(
-            uploaded_bytes, language, mode, psm, oem, engine,
-            use_gemini_correction, gemini_model, progress,
+            uploaded_bytes, language, mode, psm, oem, effective_engine,
+            effective_use_gemini, gemini_model, progress,
             page_callback=publish_ocr_preview,
+            pages_to_process=target_pages_to_process,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+        st.session_state["target_pages_processed"] = target_pages_to_process
         ocr_preview.text_area("ผล OCR", text, height=680, key="ocr_result_editor")
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
-        if use_gemini_correction and document_errors:
+        if effective_use_gemini and document_errors:
             result_status = "fallback"
             st.warning("อ่านเอกสารเสร็จแล้ว แต่ใช้ผล OCR ในเครื่องแทน Gemini เนื่องจากการตรวจแก้ทั้งเอกสารไม่สำเร็จ")
         elif page_errors:
             result_status = "partial"
             st.warning(f"อ่านเอกสารเสร็จแล้ว แต่มี {len(page_errors)} หน้าที่ควรตรวจสอบ")
-        elif use_gemini_correction:
+        elif effective_use_gemini:
             result_status = "gemini"
             st.success("อ่านเอกสารและตรวจแก้ด้วย Gemini สำเร็จ")
         else:
             result_status = "local"
-            st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง")
+            st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง (0 Token)")
         st.session_state["ocr_status"] = result_status
         stem = Path(uploaded.name).stem
         if document_errors:
@@ -1243,7 +1349,6 @@ if (
             options=[
                 "📄 จัดรูปเล่มอัตโนมัติ (Flowing — สระไม่ตก ไม่ตัด สวยงาม แนะนำสำหรับภาษาไทย)",
                 "📐 จัดวางตามพิกัดหน้าเดิม (Layered Layout — วางกล่องข้อความตามพิกัด PDF)",
-                "🖼️ ภาพต้นฉบับ (Visual — ความคมชัดสูง รักษาหน้าตาเดิม 100%)",
             ],
             index=0,
             key="docx_download_mode_radio",
@@ -1263,14 +1368,15 @@ if (
                     target_docx_bytes = export_pdf_flowing_docx(current_ocr_text)
                     target_filename = f"{stem}-flowing.docx"
                     target_help = "ไฟล์ Word จัดรูปเล่มอัตโนมัติ ใช้ฟอนต์ TH Sarabun New สระและวรรณยุกต์ครบถ้วน ไม่มั่ว แก้ไขง่าย"
-                elif selected_mode.startswith("📐"):
-                    target_docx_bytes, report = export_pdf_editable_docx(uploaded_bytes, current_ocr_text)
+                else:
+                    processed_pages = st.session_state.get("target_pages_processed")
+                    target_docx_bytes, report = export_pdf_editable_docx(
+                        uploaded_bytes,
+                        current_ocr_text,
+                        page_numbers=tuple(processed_pages) if processed_pages else None,
+                    )
                     target_filename = f"{stem}-layered.docx"
                     target_help = "ไฟล์ Word อิงพิกัดเดิม มีภาพพื้นหลังและกล่องข้อความลอยตามตำแหน่งเดิม"
-                else:
-                    target_docx_bytes = export_pdf_visual_docx(uploaded_bytes)
-                    target_filename = f"{stem}-visual.docx"
-                    target_help = "ไฟล์ Word แบบรูปภาพ รักษาหน้าตา PDF เดิมทุกประการ"
             except Exception as export_err:
                 st.error(f"เกิดข้อผิดพลาดในการสร้าง DOCX: {type(export_err).__name__}: {export_err}")
 

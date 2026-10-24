@@ -686,6 +686,7 @@ def _render_background(scratch, index: int, text_rects: list, placed: list[TextB
 
 
 def build_editable_docx(pdf_bytes: bytes, ocr_text: str = "", *,
+                        page_numbers: list[int] | None = None,
                         tesseract_cmd: str | None = None, tessdata_dir=None,
                         font_dir=None, default_font: str = DEFAULT_FONT,
                         keep_background: bool = True, prefer_text_layer_for_thai: bool = False,
@@ -711,9 +712,12 @@ def build_editable_docx(pdf_bytes: bytes, ocr_text: str = "", *,
     try:
         if doc.page_count == 0:
             raise ValueError("ไม่พบหน้าเอกสารใน PDF")
+        target_page_set = set(page_numbers) if page_numbers is not None else None
         for index in range(doc.page_count):
-            page = doc[index]
             page_no = index + 1
+            if target_page_set is not None and page_no not in target_page_set:
+                continue
+            page = doc[index]
             info: dict = {"page": page_no}
             t_boxes = boxes_from_text_dict(page.get_text("dict"), default_font)
             for b in t_boxes:
