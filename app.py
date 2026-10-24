@@ -1322,11 +1322,17 @@ elif uploaded_fingerprint and not previous_fingerprint:
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 
 if uploaded is not None:
-    with st.expander("ดู PDF ต้นฉบับ", expanded=False):
-        st.caption("เปิดเพื่อเทียบกับข้อความ OCR — PDF จะไม่แสดงค้างบนหน้าหลัก")
+    preview_column, result_column = st.columns(2, gap="medium")
+    with preview_column:
+        st.markdown("#### PDF ต้นฉบับ")
+        st.caption("เปิดค้างไว้เพื่อเทียบกับผล OCR")
         render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
+else:
+    result_column = st.container()
 
-ocr_preview = st.empty()
+with result_column:
+    st.markdown("#### ผล OCR")
+    ocr_preview = st.empty()
 
 if run:
     if uploaded is None:
