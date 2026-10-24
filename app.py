@@ -127,218 +127,23 @@ def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
         pdf_document.close()
 
 
-def _normalize_pdf_text(text: str) -> str:
-    """Normalize PDF glyph artifacts without rewriting document content."""
-    text = text.translate(str.maketrans({
-        "\uf70a": "\u0e48",
-        "\uf70b": "\u0e49",
-        "\uf70e": "\u0e4c",
-    }))
-    text = unicodedata.normalize("NFC", text)
-    text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
-    text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "ำ\\1", text)
-    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
-    return text.strip()
-
-
-def _docx_text_box(paragraph: object, text: str, left: float, top: float, width: float, height: float, font_size: float) -> None:
-    """Add an editable, absolutely positioned Word text box to a paragraph."""
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import nsmap, qn
-
-    # python-docx does not register the legacy VML namespace by default.
-    # Register it before creating the absolutely positioned text box.
-    nsmap.setdefault("v", "urn:schemas-microsoft-com:vml")
-    nsmap.setdefault("o", "urn:schemas-microsoft-com:office:office")
-
-    text = _normalize_pdf_text(text)
-    if not text:
-        return
-    run = paragraph.add_run()
-    pict = OxmlElement("w:pict")
-    shape = OxmlElement("v:shape")
-    shape.set("id", f"EditablePdfText{len(paragraph._p) + 1}")
-    shape.set(
-        "style",
-        "position:absolute;"
-        f"margin-left:{left:.2f}pt;margin-top:{top:.2f}pt;"
-        f"width:{max(2.0, width):.2f}pt;height:{max(8.0, height):.2f}pt;"
-        "mso-wrap-style:none;mso-fit-shape-to-text:false;v-text-anchor:top;",
-    )
-    shape.set("stroked", "f")
-    shape.set("filled", "f")
-    textbox = OxmlElement("v:textbox")
-    textbox.set("inset", "0,0,0,0")
-    content = OxmlElement("w:txbxContent")
-    text_paragraph = OxmlElement("w:p")
-    paragraph_properties = OxmlElement("w:pPr")
-    # Each PDF/OCR box already represents one source line. Prevent Word from
-    # reflowing that line and moving words to a different line.
-    no_wrap = OxmlElement("w:wordWrap")
-    no_wrap.set(qn("w:val"), "0")
-    paragraph_properties.append(no_wrap)
-    line_spacing = OxmlElement("w:spacing")
-    line_spacing.set(qn("w:line"), str(max(80, round(height * 20))))
-    line_spacing.set(qn("w:lineRule"), "exact")
-    paragraph_properties.append(line_spacing)
-    text_paragraph.append(paragraph_properties)
-    text_run = OxmlElement("w:r")
-    run_properties = OxmlElement("w:rPr")
-    fonts = OxmlElement("w:rFonts")
-    for attribute in ("ascii", "hAnsi", "cs", "eastAsia"):
-        fonts.set(qn(f"w:{attribute}"), "Tahoma")
-    run_properties.append(fonts)
-    size = OxmlElement("w:sz")
-    size.set(qn("w:val"), str(max(2, round(font_size * 2))))
-    run_properties.append(size)
-    text_run.append(run_properties)
-    for part_index, line_part in enumerate(text.splitlines() or [text]):
-        if part_index:
-            line_break = OxmlElement("w:br")
-            line_break.set(qn("w:type"), "textWrapping")
-            text_run.append(line_break)
-        text_node = OxmlElement("w:t")
-        text_node.set(qn("xml:space"), "preserve")
-        text_node.text = line_part
-        text_run.append(text_node)
-    text_paragraph.append(text_run)
-    content.append(text_paragraph)
-    textbox.append(content)
-    shape.append(textbox)
-    pict.append(shape)
-    run._r.append(pict)
-
-
-def _page_text_boxes(page: object) -> list[tuple[str, float, float, float, float, float]]:
-    """Return editable boxes, rejecting corrupt PDF text layers before OCR."""
-    text_boxes: list[tuple[str, float, float, float, float, float]] = []
-    text_dict = page.get_text("dict")
-    for block in text_dict.get("blocks", []):
-        for line in block.get("lines", []):
-            spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
-            if not spans:
-                continue
-            x0 = min(float(span["bbox"][0]) for span in spans)
-            y0 = min(float(span["bbox"][1]) for span in spans)
-            x1 = max(float(span["bbox"][2]) for span in spans)
-            y1 = max(float(span["bbox"][3]) for span in spans)
-            text = "".join(span.get("text", "") for span in spans).strip()
-            font_size = max(4.0, max(float(span.get("size", y1 - y0)) for span in spans))
-            text_boxes.append((text, x0, y0, max(2.0, x1 - x0), max(8.0, y1 - y0), font_size))
-
-    raw_text = "\n".join(item[0] for item in text_boxes)
-    thai_chars = len(re.findall(r"[ก-๙]", raw_text))
-    # Thai PDF text layers are frequently font-glyph mappings rather than
-    # reliable Unicode. Prefer OCR boxes for Thai so Word receives real Thai
-    # characters instead of the PDF's broken extraction sequence.
-    if thai_chars >= 20 or _pdf_text_layer_is_corrupt(raw_text):
-        ocr_boxes = _tesseract_text_boxes(page)
-        if ocr_boxes:
-            return ocr_boxes
-    if text_boxes:
-        return [(_normalize_pdf_text(item[0]), *item[1:]) for item in text_boxes]
-    return []
-
-
-def _pdf_text_layer_is_corrupt(text: str) -> bool:
-    """Detect common Thai PDF extraction failures before creating Word text."""
-    if not text.strip():
-        return True
-    if "�" in text or any("\uf700" <= char <= "\uf8ff" for char in text):
-        return True
-    if re.search(r"[\x80-\x9f]|(?:Ã|Â|â|เธ)[\x80-\x9f]", text):
-        return True
-    thai_chars = len(re.findall(r"[ก-๙]", text))
-    if thai_chars < 40:
-        return False
-    single_thai_tokens = len(re.findall(r"(?<![ก-๙])[ก-๙](?=\s|$)", text))
-    return single_thai_tokens / thai_chars > 0.08
-
-
-def _tesseract_text_boxes(page: object) -> list[tuple[str, float, float, float, float, float]]:
-    """Run Thai+English Tesseract and return line boxes in PDF points."""
-    boxes: list[tuple[str, float, float, float, float, float]] = []
-    command = tesseract_path()
-    if not command:
-        return boxes
-    image = page.get_pixmap(dpi=300, alpha=False).tobytes("png")
-    with tempfile.TemporaryDirectory(prefix="docx_ocr_") as temp_dir:
-        image_path = Path(temp_dir) / "page.png"
-        image_path.write_bytes(image)
-        result = subprocess.run(
-            [command, str(image_path), "stdout", "-l", "tha+eng", "--psm", "3", "tsv"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
-            check=False,
-        )
-    if result.returncode != 0:
-        return boxes
-    scale = 72.0 / 300.0
-    rows = csv.DictReader(io.StringIO(result.stdout.decode("utf-8", errors="replace")), delimiter="\t")
-    lines: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
-    for row in rows:
-        text = row.get("text", "").strip()
-        try:
-            confidence = float(row.get("conf", "-1"))
-        except ValueError:
-            confidence = -1
-        if not text or confidence < 0:
-            continue
-        key = (row.get("block_num", ""), row.get("par_num", ""), row.get("line_num", ""), row.get("page_num", ""))
-        lines.setdefault(key, []).append(row)
-    for words in lines.values():
-        left = min(int(word["left"]) for word in words) * scale
-        top = min(int(word["top"]) for word in words) * scale
-        right = max(int(word["left"]) + int(word["width"]) for word in words) * scale
-        bottom = max(int(word["top"]) + int(word["height"]) for word in words) * scale
-        boxes.append((" ".join(word["text"] for word in words), left, top, right - left, bottom - top, max(5.0, (bottom - top) * 0.85)))
-    return boxes
-
-
 @st.cache_data(show_spinner=False)
-def export_pdf_editable_docx(pdf_bytes: bytes) -> bytes:
-    """Create an editable DOCX by positioning real Word text over each PDF page."""
-    try:
-        import pymupdf as fitz
-    except ImportError:
-        import fitz
-    from docx import Document
-    from docx.enum.section import WD_SECTION
-    from docx.shared import Inches
+def export_pdf_editable_docx(pdf_bytes: bytes, ocr_text: str = "") -> tuple[bytes, dict]:
+    """Layered, editable DOCX (see docx_port.py): page picture behind real Word text boxes.
 
-    if not pdf_bytes:
-        raise ValueError("ไม่พบข้อมูล PDF สำหรับสร้าง DOCX ที่แก้ไขได้")
-    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        output = io.BytesIO()
-        word_document = Document()
-        first_section = word_document.sections[0]
-        for page_index in range(pdf_document.page_count):
-            page = pdf_document[page_index]
-            page_width = max(1.0, float(page.rect.width))
-            page_height = max(1.0, float(page.rect.height))
-            section = first_section if page_index == 0 else word_document.add_section(WD_SECTION.NEW_PAGE)
-            section.page_width = Inches(page_width / 72.0)
-            section.page_height = Inches(page_height / 72.0)
-            section.top_margin = section.bottom_margin = Inches(0)
-            section.left_margin = section.right_margin = Inches(0)
-            section.header_distance = section.footer_distance = Inches(0)
-            paragraph = word_document.add_paragraph()
-            paragraph.paragraph_format.space_before = Inches(0)
-            paragraph.paragraph_format.space_after = Inches(0)
-            for text, left, top, width, height, font_size in _page_text_boxes(page):
-                _docx_text_box(paragraph, text, left, top, width, height, font_size)
-        word_document.core_properties.title = "MyOCR PDF editable DOCX export"
-        word_document.core_properties.subject = "PDF text reconstructed as editable Word text"
-        word_document.core_properties.comments = (
-            "Text is positioned using PDF text-layer or OCR bounding boxes. "
-            "Non-text graphics are not reproduced as a full-page image."
-        )
-        word_document.save(output)
-        return output.getvalue()
-    finally:
-        pdf_document.close()
+    ocr_text is the final text shown in the app (Typhoon / Gemini / Tesseract) with its
+    "----- หน้า N -----" markers; docx_port aligns it onto each page line geometry, so
+    corrected text reaches the DOCX instead of a second, independent Tesseract pass.
+    """
+    from docx_port import build_editable_docx
+
+    return build_editable_docx(
+        pdf_bytes,
+        ocr_text,
+        tesseract_cmd=tesseract_path(),
+        tessdata_dir=TESSDATA_DIR,
+        font_dir=Path(__file__).resolve().parent / "fonts",
+    )
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
@@ -1377,11 +1182,21 @@ if run:
         docx_status = st.empty()
         docx_status.info("กำลังสร้างไฟล์ DOCX...")
         try:
-            editable_docx = export_pdf_editable_docx(uploaded_bytes)
+            editable_docx, docx_report = export_pdf_editable_docx(uploaded_bytes, text)
             st.session_state["docx_bytes"] = editable_docx
             st.session_state["docx_result_fingerprint"] = uploaded_fingerprint
             st.session_state["docx_export_mode"] = "editable"
             docx_status.success("สร้างไฟล์ DOCX สำเร็จ")
+            for docx_warning in docx_report.get("warnings", []):
+                st.warning(docx_warning)
+            report_pages = [item for item in docx_report.get("pages", []) if "ref_lines" in item]
+            total_lines = sum(item.get("boxes", 0) for item in report_pages)
+            used_lines = sum(item.get("matched", 0) + item.get("rescued", 0) for item in report_pages)
+            if total_lines:
+                st.caption(
+                    f"ใช้ข้อความที่ตรวจแก้แล้ว {used_lines}/{total_lines} บรรทัด · "
+                    "บรรทัดที่เหลือใช้ข้อความจาก PDF/OCR เดิม"
+                )
         except Exception as editable_error:
             try:
                 visual_docx = export_pdf_visual_docx(uploaded_bytes)
