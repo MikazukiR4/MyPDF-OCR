@@ -1,4 +1,5 @@
 import io
+import html
 import hashlib
 import csv
 import base64
@@ -40,6 +41,8 @@ TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 # pytesseract configuration
 OEM_LSTM_ONLY = "1"
 PSM_VALUES = ["3", "6", "4"]
+PDF_VIEWER_HEIGHT = 820
+OCR_EDITOR_HEIGHT = PDF_VIEWER_HEIGHT
 
 
 TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
@@ -874,7 +877,7 @@ def extract_pdf(
         document.close()
 
 
-def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
+def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_HEIGHT) -> None:
     """Show a PDF viewer with built-in fit, zoom-in, and zoom-out controls."""
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
@@ -889,19 +892,45 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> Non
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          html, body, #pdf-viewer {{ width:100%; height:100%; min-height:620px; margin:0; }}
+          html, body {{ width:100%; height:100%; min-height:100%; margin:0; }}
           body {{ overflow:hidden; background:#172554; }}
+          #viewer-shell {{ position:relative; width:100%; height:100%; min-height:0; overflow:hidden; }}
+          #pdf-viewer {{ width:100%; height:100%; min-height:0; }}
+          #zoom-controls {{ position:absolute; top:72px; right:12px; z-index:20; display:flex; align-items:center; gap:4px; padding:4px; border-radius:10px; background:rgba(15,23,42,.88); box-shadow:0 3px 12px rgba(0,0,0,.28); }}
+          #zoom-controls button {{ width:34px; height:32px; border:0; border-radius:7px; background:#334155; color:#fff; font-size:20px; line-height:1; cursor:pointer; }}
+          #zoom-controls button:hover {{ background:#475569; }}
+          #zoom-level {{ min-width:52px; color:#fff; font:600 12px system-ui,sans-serif; text-align:center; }}
           #viewer-error {{ padding:1rem; color:#fecaca; font:14px sans-serif; }}
         </style>
       </head>
       <body>
-        <div id="pdf-viewer" aria-label="ตัวอย่าง PDF: {safe_name}"></div>
+        <div id="viewer-shell">
+          <div id="pdf-viewer" aria-label="ตัวอย่าง PDF: {safe_name}"></div>
+          <div id="zoom-controls" aria-label="ควบคุมการซูม PDF">
+            <button id="zoom-out" type="button" aria-label="ซูมออก" title="ซูมออก">−</button>
+            <span id="zoom-level" aria-live="polite">100%</span>
+            <button id="zoom-in" type="button" aria-label="ซูมเข้า" title="ซูมเข้า">+</button>
+            <button id="zoom-fit" type="button" aria-label="พอดีหน้าต่าง" title="พอดีหน้าต่าง">Fit</button>
+          </div>
+        </div>
         <div id="viewer-error" role="alert" hidden></div>
         <script type="module">
           import EmbedPDF from "https://cdn.jsdelivr.net/npm/@embedpdf/snippet@2/dist/embedpdf.js";
           const payload = {{ data: "{encoded_pdf}" }};
           const target = document.getElementById("pdf-viewer");
           const errorTarget = document.getElementById("viewer-error");
+          const zoomLevel = document.getElementById("zoom-level");
+          let zoom = 1;
+          function applyZoom(nextZoom) {{
+            zoom = Math.max(0.75, Math.min(2.5, nextZoom));
+            target.style.zoom = String(zoom);
+            target.style.width = `${{100 / zoom}}%`;
+            target.style.height = `${{100 / zoom}}%`;
+            zoomLevel.textContent = `${{Math.round(zoom * 100)}}%`;
+          }}
+          document.getElementById("zoom-out").addEventListener("click", () => applyZoom(zoom - 0.1));
+          document.getElementById("zoom-in").addEventListener("click", () => applyZoom(zoom + 0.1));
+          document.getElementById("zoom-fit").addEventListener("click", () => applyZoom(1));
           function showError(message) {{
             errorTarget.textContent = message;
             errorTarget.hidden = false;
@@ -943,7 +972,10 @@ def inject_css() -> None:
         .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
         header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
         [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
-        .block-container { max-width: 1200px; padding-top: 3.5rem; }
+        .block-container { width: min(100%, 1600px); max-width: 1600px; padding-top: 3.5rem; }
+        :root { --panel-height: min(78vh, 820px); }
+        div[data-testid="stIFrame"], div[data-testid="stCustomComponentV1"] { height:var(--panel-height) !important; min-height:0 !important; }
+        div[data-testid="stIFrame"] iframe, div[data-testid="stCustomComponentV1"] iframe { height:100% !important; min-height:0 !important; }
         .mypdf-header { display:flex; align-items:center; gap:12px; margin-bottom:2rem; }
         .mypdf-icon { background:var(--accent); color:#fff; border-radius:9px; padding:9px 12px; font-size:24px; box-shadow:0 4px 10px rgba(220,38,38,.2); }
         .mypdf-name { font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.3px; }
@@ -967,6 +999,8 @@ def inject_css() -> None:
         div[data-testid="stDownloadButton"] > button:hover { background:#115e59 !important; color:#ffffff !important; }
         div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#172033 !important; font-weight:700 !important; }
         div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; border-radius:10px !important; font-size:16px !important; line-height:1.7 !important; opacity:1 !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; }
+        div[data-testid="stTextArea"] textarea { height:var(--panel-height) !important; min-height:var(--panel-height) !important; max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; resize:none !important; box-sizing:border-box !important; }
+        div[data-testid="stCodeBlock"] pre { max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; }
         div[data-testid="stTextArea"] textarea::placeholder { color:#64748b !important; opacity:1 !important; }
         div[data-testid="stAlert"] { color:#172033 !important; border-radius:10px !important; }
         div[data-testid="stAlert"] p { color:inherit !important; }
@@ -979,6 +1013,8 @@ def inject_css() -> None:
         aside[data-testid="stSidebar"] [data-baseweb="select"] * { color:#172033 !important; }
         aside[data-testid="stSidebar"] [data-baseweb="select"] input, aside[data-testid="stSidebar"] [data-baseweb="select"] [role="combobox"] { color:#172033 !important; -webkit-text-fill-color:#172033 !important; }
         .small-note { color:#64748b; font-size:13px; }
+        .pdf-empty { height:var(--panel-height); box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:2rem; border:1px dashed #64748b; border-radius:12px; background:#020617; color:#94a3b8; text-align:center; line-height:1.7; }
+        .ocr-live-preview { height:var(--panel-height); box-sizing:border-box; padding:16px; border:2px solid #64748b; border-radius:10px; background:#020617; color:#ffffff; font:16px/1.7 "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:hidden; overflow-y:auto; }
         /* Dark mode: keep every surface and text role readable together. */
         .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] { background:#0b1220 !important; color:#f8fafc !important; }
         .block-container { color:#f8fafc !important; }
@@ -987,7 +1023,7 @@ def inject_css() -> None:
         .subtitle, .small-note, .stCaption, .stMarkdown, .stMarkdown p, label, label p { color:#cbd5e1 !important; }
         div[data-testid="stFileUploader"], div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#111827 !important; border-color:#64748b !important; color:#f8fafc !important; }
         div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#cbd5e1 !important; }
-        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; font-size:16px !important; line-height:1.7 !important; }
+        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; font-size:16px !important; line-height:1.7 !important; height:var(--panel-height) !important; min-height:var(--panel-height) !important; max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; resize:none !important; }
         div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#f8fafc !important; }
         div[data-testid="stAlert"] { background:#172033 !important; color:#f8fafc !important; border-color:#475569 !important; }
         div[data-testid="stAlert"] p { color:#f8fafc !important; }
@@ -1007,6 +1043,7 @@ def inject_css() -> None:
         .gemini-rating-stars { color:#fbbf24; letter-spacing:1px; font-size:1rem; }
         .gemini-rating-help { color:#94a3b8; font-size:0.78rem; }
         @media (max-width: 700px) {
+            :root { --panel-height: min(62vh, 620px); }
             .block-container { padding-left:1rem; padding-right:1rem; padding-top:2.5rem; }
             .mypdf-header { margin-bottom:1.25rem; }
             .mypdf-name { font-size:25px; }
@@ -1016,13 +1053,17 @@ def inject_css() -> None:
             .ocr-card { padding:16px; }
             div[data-testid="stTextArea"] textarea { font-size:15px !important; }
         }
+        @media (max-width: 900px) {
+            [data-testid="stHorizontalBlock"] { flex-direction:column !important; gap:1rem !important; }
+            [data-testid="stColumn"] { width:100% !important; min-width:100% !important; flex:1 1 100% !important; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-st.set_page_config(page_title="MyOCR PDF — Thai", page_icon="📄", layout="centered")
+st.set_page_config(page_title="MyOCR PDF — Thai", page_icon="📄", layout="wide")
 inject_css()
 
 st.markdown(
@@ -1096,7 +1137,6 @@ with st.sidebar:
     st.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
     use_gemini_correction = st.checkbox(
         "ใช้ Gemini ตรวจแก้สระและวรรณยุกต์",
-        value=True,
         key="use_gemini_correction",
         disabled=not gemini_key_available,
         help="Gemini จะใช้ภาพ PDF ร่วมกับข้อความที่อ่านได้ เพื่อแก้ปัญหา เช่น กำร/นำยกรัฐมนตรี/ว่ำ",
@@ -1244,14 +1284,17 @@ if uploaded is not None and total_doc_pages > 0:
 
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 
-if uploaded is not None:
-    preview_column, result_column = st.columns(2, gap="medium")
-    with preview_column:
-        st.markdown("#### PDF ต้นฉบับ")
-        st.caption("เปิดค้างไว้เพื่อเทียบกับผล OCR")
-        render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
-else:
-    result_column = st.container()
+preview_column, result_column = st.columns(2, gap="medium")
+with preview_column:
+    st.markdown("#### PDF ต้นฉบับ")
+    st.caption("เปิดค้างไว้เพื่อเทียบกับผล OCR")
+    if uploaded is not None:
+        render_pdf_viewer(uploaded_bytes, uploaded.name, height=PDF_VIEWER_HEIGHT)
+    else:
+        st.markdown(
+            '<div class="pdf-empty">อัปโหลดไฟล์ PDF เพื่อแสดงตัวอย่างเอกสารที่นี่</div>',
+            unsafe_allow_html=True,
+        )
 
 with result_column:
     st.markdown("#### ผล OCR")
@@ -1265,7 +1308,10 @@ if run:
 
     def publish_ocr_preview(current_text: str) -> None:
         if current_text:
-            ocr_preview.code(current_text, language=None)
+            ocr_preview.markdown(
+                f'<div class="ocr-live-preview">{html.escape(current_text)}</div>',
+                unsafe_allow_html=True,
+            )
 
     try:
         page_cache = st.session_state.setdefault("ocr_page_cache", {})
@@ -1280,7 +1326,7 @@ if run:
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
         st.session_state["target_pages_processed"] = target_pages_to_process
-        ocr_preview.text_area("ผล OCR", text, height=680, key="ocr_result_editor")
+        ocr_preview.text_area("ผล OCR", text, height=OCR_EDITOR_HEIGHT, key="ocr_result_editor")
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if effective_use_gemini and document_errors:
@@ -1322,16 +1368,14 @@ if run:
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
-if (
-    not run
-    and uploaded is not None
-    and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
-    and st.session_state.get("ocr_text")
-):
+# Keep the OCR editor visible by default, including before the first OCR run.
+# This gives users a stable target for the result and keeps the two panels from
+# jumping when OCR starts or when the selected file changes.
+if not run:
     ocr_preview.text_area(
         "ผล OCR",
-        st.session_state["ocr_text"],
-        height=680,
+        st.session_state.get("ocr_text", ""),
+        height=OCR_EDITOR_HEIGHT,
         key="ocr_result_editor",
     )
 
