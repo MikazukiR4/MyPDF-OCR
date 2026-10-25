@@ -972,7 +972,7 @@ def inject_css() -> None:
         .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
         header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
         [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
-        .block-container { width: min(100%, 1600px); max-width: 1600px; padding-top: 3.5rem; }
+        .block-container { width:100%; max-width:none; padding:3.5rem clamp(1rem, 3vw, 3rem) 2rem; }
         :root { --panel-height: min(78vh, 820px); }
         div[data-testid="stIFrame"], div[data-testid="stCustomComponentV1"] { height:var(--panel-height) !important; min-height:0 !important; }
         div[data-testid="stIFrame"] iframe, div[data-testid="stCustomComponentV1"] iframe { height:100% !important; min-height:0 !important; }
