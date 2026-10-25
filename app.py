@@ -894,7 +894,7 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
         <style>
           html, body {{ width:100%; height:100%; min-height:100%; margin:0; }}
           body {{ overflow:hidden; background:#172554; }}
-          #viewer-shell {{ position:relative; width:100%; height:100%; min-height:0; overflow:hidden; }}
+          #viewer-shell {{ position:relative; width:100%; height:100%; min-height:0; overflow:auto; }}
           #pdf-viewer {{ width:100%; height:100%; min-height:0; }}
           #zoom-controls {{ position:absolute; top:72px; right:12px; z-index:20; display:flex; align-items:center; gap:4px; padding:4px; border-radius:10px; background:rgba(15,23,42,.88); box-shadow:0 3px 12px rgba(0,0,0,.28); }}
           #zoom-controls button {{ width:34px; height:32px; border:0; border-radius:7px; background:#334155; color:#fff; font-size:20px; line-height:1; cursor:pointer; }}
@@ -924,8 +924,8 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
           function applyZoom(nextZoom) {{
             zoom = Math.max(0.75, Math.min(2.5, nextZoom));
             target.style.zoom = String(zoom);
-            target.style.width = `${{100 / zoom}}%`;
-            target.style.height = `${{100 / zoom}}%`;
+            target.style.width = "100%";
+            target.style.height = "100%";
             zoomLevel.textContent = `${{Math.round(zoom * 100)}}%`;
           }}
           document.getElementById("zoom-out").addEventListener("click", () => applyZoom(zoom - 0.1));
