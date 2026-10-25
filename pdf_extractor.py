@@ -8,17 +8,13 @@ from pathlib import Path
 from datetime import datetime
 import json
 
+from core.utils.cleaners import clean_thai_ocr_text
+
 def clean_text(text: str) -> str:
     """
-    ทำความสะอาดข้อความและจัดการช่องว่างให้เป็นระเบียบ
+    ทำความสะอาดข้อความ จัดการช่องว่าง และ Normalize อักษรไทย/PUA
     """
-    if not text:
-        return ""
-    # ลบช่องว่างที่ซ้ำซ้อน
-    text = re.sub(r'[ \t]+', ' ', text)
-    # จัดการการขึ้นบรรทัดใหม่
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    return text.strip()
+    return clean_thai_ocr_text(text)
 
 def extract_text_from_pdf(pdf_path: str, output_format: str = "dict") -> dict | str | None:
     """

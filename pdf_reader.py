@@ -6,6 +6,9 @@ from pathlib import Path
 import json
 
 
+from core.utils.cleaners import clean_thai_ocr_text
+
+
 def read_pdf_with_path(pdf_path: str):
     """
     อ่านข้อมูลจากไฟล์ PDF โดยใช้ path
@@ -24,8 +27,8 @@ def read_pdf_with_path(pdf_path: str):
         extracted_data = {}
 
         for i, page in enumerate(doc):
-            # Extrac ข้อความธรรมดา
-            text = page.get_text("text")
+            # Extract ข้อความธรรมดา
+            text = clean_thai_ocr_text(page.get_text("text") or "")
 
             # แปลงตารางถ้ามี
             tables = page.find_tables()

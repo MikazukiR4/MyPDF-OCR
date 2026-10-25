@@ -19,17 +19,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
-# Import OCR cleaners - fallback to simple cleaning if not available
-try:
-    from core.utils.cleaners import clean_thai_ocr_text
-except ImportError:
-    def clean_thai_ocr_text(text: str) -> str:
-        if not text:
-            return ""
-        text = text.strip()
-        text = re.sub(r'\[\d+\]', '', text)  # Remove OCR page markers like [1]
-        text = re.sub(r'[^ก-๐\s,\.!?]+', '', text)  # Keep only Thai chars and punctuation
-        return " ".join(text.split())[:100000]
+# Import OCR cleaners and exceptions
+from core.utils.cleaners import (
+    clean_thai_ocr_text,
+    clean_simple_text,
+    thai_text_quality_score,
+    normalize_thai_unicode,
+)
+from core.exceptions import with_api_retry, OCRError, TransientOCRError, PermanentOCRError
 
 load_dotenv()
 load_dotenv(".env.typhoon", override=False)
@@ -186,249 +183,12 @@ def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
         )
     image = ImageOps.grayscale(image)
     if mode == "best":
-        image = ImageOps.autocontrast(image, cutoff=0.3)
-        image = image.filter(ImageFilter.SHARPEN)
+        image = ImageOps.autocontrast(image, cutoff=0.5)
+        image = image.filter(ImageFilter.MedianFilter(size=3))
         image = image.point(lambda p: 255 if p > 235 else (0 if p < 45 else p))
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
-
-
-def clean_thai_ocr_text(text: str) -> str:
-    """Normalize Thai text and remove common floating-diacritic OCR garbage."""
-    if not text:
-        return ""
-    # Some Thai PDF fonts expose tone marks through Private Use Area glyphs.
-    # Convert only the mappings observed in the embedded text layer so that
-    # normal Unicode text is left unchanged.
-    text = text.translate(str.maketrans({
-        "\uf70a": "\u0e48",  # mai ek: ่
-        "\uf70b": "\u0e49",  # mai tho: ้
-        "\uf70e": "\u0e4c",  # thanthakhat: ์
-    }))
-    # C1 FIX: Remove the broken tone mark swap regex that reverses Unicode order
-    # Old code: r"([\u0e48-\u0e4b])\u0e33" -> "ำ\\1" which puts tone AFTER ำ
-    # This causes: น้ำ → นำ้, ต่ำ → ตำ่ (wrong!)
-    # FIX: Remove this line entirely - NFKC normalization already handles combining marks correctly
-    text = unicodedata.normalize("NFC", text)
-
-    # C3 FIX: Fix floating line filter to exclude number-only rows and short English headers
-    # Old logic erroneously removed these intended as section headers
-    output = []
-    for line in text.splitlines():
-        compact = re.sub(r"\s+", "", line)
-        tokens = line.split()
-        thai_letters = len(re.findall(r"[ก-ฮ]", compact))
-        ascii_letters = len(re.findall(r"[A-Za-z]", compact))
-        symbols = len(re.findall(r"[=/_~^|<>*+`\"'""‘’.,:;!?-]", compact))
-        short_tokens = sum(len(token) <= 2 for token in tokens)
-        
-        # FIXED: Don't filter out number-only rows (like page numbers, headers)
-        is_number_only = re.fullmatch(r"[0-9๐-๙.,/-]+", compact or " ")
-        is_floating_line = (
-            len(tokens) >= 3
-            and short_tokens / len(tokens) >= 0.75
-            and thai_letters <= 3
-        ) or (
-            # FIXED: Only filter short mixed lines, not number-only headers
-            len(compact) <= 8 
-            and thai_letters <= 1 
-            and (ascii_letters or symbols)
-            and not is_number_only  # Skip filtering purely numeric lines
-        )
-        
-        if compact and not is_floating_line:
-            output.append(re.sub(r"[ \t]{3,}", "  ", line.rstrip()))
-
-    output = []
-    for line in text.splitlines():
-        compact = re.sub(r"\s+", "", line)
-        tokens = line.split()
-        thai_letters = len(re.findall(r"[ก-ฮ]", compact))
-        ascii_letters = len(re.findall(r"[A-Za-z]", compact))
-        symbols = len(re.findall(r"[=/_~^|<>*+`\"'“”‘’.,:;!?-]", compact))
-        short_tokens = sum(len(token) <= 2 for token in tokens)
-        is_floating_line = (
-            len(tokens) >= 3
-            and short_tokens / len(tokens) >= 0.75
-            and thai_letters <= 3
-        ) or (
-            len(compact) <= 8
-            and thai_letters <= 1
-            and (ascii_letters or symbols)
-            and not re.fullmatch(r"[0-9๐-๙.,/-]+", compact or " ")
-        )
-        if compact and not is_floating_line:
-            output.append(re.sub(r"[ \t]{3,}", "  ", line.rstrip()))
-
-    text = "\n".join(output)
-    # C2 FIX: Remove auto-mapping of "พ.ค." to "พ.ศ." for May dates (15 พ.ค.)
-    # Keep only the year conversion regex that's safe
-    replacements = (
-        (r"(?m)^(\s*)เรอง(\s+)", r"\1เรื่อง\2"),
-        (r"(?m)^(\s*)(?:อางถง|อางถึง|อ้างถง)(\s+)", r"\1อ้างถึง\2"),
-        (r"(?m)^(\s*)(?:สิงที่ส่งมาด้วย|สิงทีส่งมาด้วย|สิ่งที่สงมาดวย)(\s+)", r"\1สิ่งที่ส่งมาด้วย\2"),
-        (r"(?:หนงสอจงหวด|หนงสือจงหวด|หนงสอจังหวัด|หนังสือจงหวด)", "หนังสือจังหวัด"),
-        (r"(\s)ท(\s+(?:ศธ|สส|มท|กค|นร|อว|พม|สธ|กษ|รง|ยธ|ทส|วธ)\s+[๐-๙0-9])", r"\1ที่\2"),
-        (r"(?:ลงวันท|ลงวนท|ลงวนที่)(\s+)", r"ลงวันที่\1"),
-        (r"(?<=ลงวันที่\s)mo(?=\s+[ก-๙])", "๓๐"),
-        (r"(?:ประจำปงบประมาณ|ประจําปงบประมาณ)", "ประจำปีงบประมาณ"),
-        # C2: Removed the dangerous auto-mapping "(?:we|wa|w\.ศ|พ\.ค|พ\.ศ)\.\s*(?=[๐-๙]{4}|\\d{4})" -> "พ.ศ. "
-        # This would convert "15 พ.ค." to "15 พ.ศ." destroying May dates!
-        (r"(?:we|wa|w\\.ศ)", "พ.ศ"),  # Keep only W.C. conversion
-        (r"(?:ง|ร)การขับเคลือน", r"\1การขับเคลื่อน"),  # Fixed typo handling
-        (r"ในการนี(?=\s|$)", "ในการนี้"),
-        (r"(?:ในส่วน(?:ทีเกียวข้อง|ที่เกียวข้อง|ที่เกี่ยวข้อง)", "ในส่วนที่เกี่ยวข้อง"),
-        (r"(?:อำเกอ|อําเกอ)", "อำเภอ"),
-    )
-    replacements = (
-        (r"(?m)^(\s*)เรอง(\s+)", r"\1เรื่อง\2"),
-        (r"(?m)^(\s*)(?:อางถง|อางถึง|อ้างถง)(\s+)", r"\1อ้างถึง\2"),
-        (r"(?m)^(\s*)(?:สิงที่ส่งมาด้วย|สิงทีส่งมาด้วย|สิ่งที่สงมาดวย)(\s+)", r"\1สิ่งที่ส่งมาด้วย\2"),
-        (r"(?:หนงสอจงหวด|หนงสือจงหวด|หนงสอจังหวัด|หนังสือจงหวด)", "หนังสือจังหวัด"),
-        (r"(\s)ท(\s+(?:ศธ|สส|มท|กค|นร|อว|พม|สธ|กษ|รง|ยธ|ทส|วธ)\s+[๐-๙0-9])", r"\1ที่\2"),
-        (r"(?:ลงวันท|ลงวนท|ลงวนที่)(\s+)", r"ลงวันที่\1"),
-        (r"(?<=ลงวันที่\s)mo(?=\s+[ก-๙])", "๓๐"),
-        (r"(?:ประจำปงบประมาณ|ประจําปงบประมาณ)", "ประจำปีงบประมาณ"),
-        (r"(?:we|wa|w\.ศ|พ\.ค|พ\.ศ)\.\s*(?=[๐-๙]{4}|\d{4})", "พ.ศ. "),
-        (r"การขับเคลือน", "การขับเคลื่อน"),
-        (r"ในการนี(?=\s|$)", "ในการนี้"),
-        (r"ในส่วน(?:ทีเกียวข้อง|ที่เกียวข้อง|ทีเกี่ยวข้อง)", "ในส่วนที่เกี่ยวข้อง"),
-        (r"(?:อำเกอ|อําเกอ)", "อำเภอ"),
-    )
-    )
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text)
-    
-    # C4 FIX: Preserve whitespace between paragraphs instead of stripping all newlines
-    # Old code: return re.sub(r"\n{3,}", "\n\n", text).strip()
-    # This caused distinct paragraphs to merge into one block
-    # FIX: Use splitlines() + join to preserve paragraph spacing correctly
-    lines = text.splitlines(keepends=True)
-    output = []
-    for line in lines:
-        if line.strip():  # Only add non-empty lines (preserves blank lines between paragraphs)
-            compacted = re.sub(r"[ \t]{3,}", "  ", line.rstrip())
-            output.append(compacted)
-    
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    """Read an existing PDF text layer before falling back to image OCR."""
-    try:
-        raw = page.get_text("text") or ""
-    except Exception:
-        return ""
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return clean_thai_ocr_text(raw.strip())
-
-
-def typhoon_api_key() -> str:
-    return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
-
-
-def available_ocr_engines() -> list[str]:
-    engines = ["tesseract"] if tesseract_path() else []
-    if typhoon_api_key():
-        engines.insert(0, "typhoon")
-    return engines
-
-
-def usable_ocr_engine(engine: str) -> str:
-    if engine == "typhoon" and not typhoon_api_key():
-        return "tesseract"
-    return engine if engine in available_ocr_engines() else "tesseract"
-
-
-def typhoon_transcribe(image_bytes: bytes) -> str:
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    """Read an existing PDF text layer before falling back to image OCR."""
-    try:
-        raw = page.get_text("text") or ""
-    except Exception:
-        return ""
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return clean_thai_ocr_text(raw.strip())
-
-
-def typhoon_api_key() -> str:
-    return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
-
-
-def available_ocr_engines() -> list[str]:
-    engines = ["tesseract"] if tesseract_path() else []
-    if typhoon_api_key():
-        engines.insert(0, "typhoon")
-    return engines
-
-
-def usable_ocr_engine(engine: str) -> str:
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    """Read an existing PDF text layer before falling back to image OCR."""
-    try:
-        raw = page.get_text("text") or ""
-    except Exception:
-        return ""
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return clean_thai_ocr_text(raw.strip())
-
-
-def typhoon_api_key() -> str:
-    return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
-
-
-def available_ocr_engines() -> list[str]:
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    return "\n".join(output).strip()
-    return "\n".join(output).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
-    """Read an existing PDF text layer before falling back to image OCR."""
-    try:
-        raw = page.get_text("text") or ""
-    except Exception:
-        return ""
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return clean_thai_ocr_text(raw.strip())
-
-
-def typhoon_api_key() -> str:
-def embedded_pdf_text(page: object) -> str:
-
-
-def embedded_pdf_text(page: object) -> str:
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-
-def embedded_pdf_text(page: object) -> str:
 
 
 def embedded_pdf_text(page: object) -> str:
@@ -461,6 +221,7 @@ def usable_ocr_engine(engine: str) -> str:
     return engine if engine in available_ocr_engines() else "tesseract"
 
 
+@with_api_retry()
 def typhoon_transcribe(image_bytes: bytes) -> str:
     """Use Typhoon OCR for Thai government documents and handwriting."""
     api_key = typhoon_api_key()
@@ -639,6 +400,25 @@ def gemini_rating_html(label: str, score: object, description: str) -> str:
     )
 
 
+def validate_gemini_guard(source_text: str, corrected: str) -> None:
+    """Ensure Gemini did not hallucinate, drop critical numbers, or alter text length wildly."""
+    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.40)):
+        raise RuntimeError("Gemini ส่งข้อความแก้ไขกลับมาสั้นผิดปกติ จึงคงข้อความเดิมไว้")
+    if len(corrected) > max(100, round(len(source_text) * 2.0)):
+        raise RuntimeError("Gemini ส่งข้อความแก้ไขกลับมายาวเกินต้นฉบับมากผิดปกติ (อาจ hallucinate)")
+
+    source_nums = set(re.findall(r"[0-9๐-๙]{2,}", source_text))
+    if source_nums:
+        corrected_nums = set(re.findall(r"[0-9๐-๙]{2,}", corrected))
+        th_to_ar = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+        source_normalized = {n.translate(th_to_ar) for n in source_nums}
+        corrected_normalized = {n.translate(th_to_ar) for n in corrected_nums}
+        preserved = source_normalized.intersection(corrected_normalized)
+        if len(source_normalized) >= 3 and len(preserved) / len(source_normalized) < 0.50:
+            raise RuntimeError("Gemini แก้ไขแล้วทำให้ตัวเลข/วันที่สำคัญในเอกสารสูญหายเกิน 50% จึงคงข้อความเดิมไว้")
+
+
+@with_api_retry()
 def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
     """Correct Thai PDF text using the page image as the source of truth."""
     api_key = gemini_api_key()
@@ -689,11 +469,11 @@ def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Gemini ไม่ส่งข้อความกลับมา") from exc
 
-    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
-        raise RuntimeError("Gemini ส่งข้อความแก้ไขกลับมาสั้นผิดปกติ จึงคงข้อความเดิมไว้")
+    validate_gemini_guard(source_text, corrected)
     return clean_thai_ocr_text(corrected)
 
 
+@with_api_retry()
 def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> str:
     """Correct a PDF using Gemini's native document understanding.
 
@@ -750,8 +530,7 @@ def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> s
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Gemini returned no document text") from exc
 
-    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
-        raise RuntimeError("Gemini document correction returned unexpectedly short text")
+    validate_gemini_guard(source_text, corrected)
     validate_document_markers(source_text, corrected)
     return clean_thai_ocr_text(corrected)
 
@@ -918,6 +697,7 @@ def extract_pdf(
     progress: object,
     page_callback: object | None = None,
     pages_to_process: list[int] | None = None,
+    page_cache: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
     try:
         import pymupdf as fitz
@@ -970,14 +750,46 @@ def extract_pdf(
 
                 def recognize_page(page_number: int) -> tuple[int, str, str, bytes]:
                     image_bytes = page_images[page_number]
-                    text = (
-                        typhoon_transcribe(image_bytes)
-                        if engine == "typhoon"
-                        else worker.recognize(image_bytes)
-                    )
+                    # Step 0: Check per-page cache
+                    if page_cache and page_number in page_cache:
+                        cached_text, cached_method = page_cache[page_number]
+                        if cached_text:
+                            return page_number, cached_text, f"{cached_method} (cached)", image_bytes
+
+                    # Step 1: Check embedded text layer
+                    page_obj = document[page_number - 1]
+                    embedded = embedded_pdf_text(page_obj)
+                    if embedded and thai_text_quality_score(embedded) >= 0.70:
+                        if page_cache is not None:
+                            page_cache[page_number] = (embedded, "embedded text")
+                        return page_number, embedded, "embedded text", image_bytes
+
+                    # Step 2: Run primary OCR engine
+                    method = engine
+                    if engine == "typhoon":
+                        text = typhoon_transcribe(image_bytes)
+                    else:
+                        text = worker.recognize(image_bytes)
+                        # Step 3: Fallback chain to Typhoon if Tesseract produced poor quality and Typhoon API key is available
+                        if thai_text_quality_score(text) < 0.55 and typhoon_api_key():
+                            try:
+                                typhoon_text = typhoon_transcribe(image_bytes)
+                                if thai_text_quality_score(typhoon_text) > thai_text_quality_score(text):
+                                    text = typhoon_text
+                                    method = "typhoon (fallback from low-quality tesseract)"
+                            except Exception:
+                                pass
+
                     if not text:
+                        if embedded:
+                            if page_cache is not None:
+                                page_cache[page_number] = (embedded, "embedded text (fallback)")
+                            return page_number, embedded, "embedded text (fallback)", image_bytes
                         raise RuntimeError("OCR engine ส่งข้อความว่างกลับมา")
-                    return page_number, text, engine, image_bytes
+
+                    if page_cache is not None:
+                        page_cache[page_number] = (text, method)
+                    return page_number, text, method, image_bytes
 
                 page_data: dict[int, tuple[str, str, bytes | None]] = {}
                 with ThreadPoolExecutor(max_workers=min(OCR_MAX_WORKERS, len(page_images))) as executor:
@@ -995,9 +807,10 @@ def extract_pdf(
 
                 gemini_jobs = {
                     page_number: (image_bytes, text)
-                    for page_number, (text, _, image_bytes) in page_data.items()
+                    for page_number, (text, method, image_bytes) in page_data.items()
                     if use_gemini_correction
                     and not gemini_document_mode
+                    and not method.startswith("embedded")
                     and image_bytes is not None
                     and text
                     and not text.startswith("[")
@@ -1017,6 +830,8 @@ def extract_pdf(
                                     corrected_text = gemini_futures[page_number].result()
                                     _, _, image_bytes = page_data[page_number]
                                     page_data[page_number] = (corrected_text, "Gemini corrected", image_bytes)
+                                    if page_cache is not None:
+                                        page_cache[page_number] = (corrected_text, "Gemini corrected")
                                 except Exception as correction_error:
                                     errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
 
@@ -1357,6 +1172,7 @@ if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != pre
     st.session_state.pop("docx_result_fingerprint", None)
     st.session_state.pop("docx_export_mode", None)
     st.session_state.pop("target_pages_processed", None)
+    st.session_state.pop("ocr_page_cache", None)
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
     st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
@@ -1452,11 +1268,13 @@ if run:
             ocr_preview.code(current_text, language=None)
 
     try:
+        page_cache = st.session_state.setdefault("ocr_page_cache", {})
         text, errors, failed_images = extract_pdf(
             uploaded_bytes, language, mode, psm, oem, effective_engine,
             effective_use_gemini, gemini_model, progress,
             page_callback=publish_ocr_preview,
             pages_to_process=target_pages_to_process,
+            page_cache=page_cache,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         st.session_state["ocr_text"] = text

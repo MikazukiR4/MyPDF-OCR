@@ -28,28 +28,14 @@ PAGE_MARKER_RE = re.compile(
 )
 
 
+from core.utils.cleaners import normalize_thai_unicode
+
+
 def normalize_thai_text(text: str) -> str:
     """Fix Thai PDF glyph artifacts (PUA tone marks, split sara am, mark order)."""
     if not text:
         return ""
-    # PUA mapping for legacy PDF font tone marks
-    text = text.translate(str.maketrans({
-        "\uf70a": "\u0e48",  # mai ek
-        "\uf70b": "\u0e49",  # mai tho
-        "\uf70c": "\u0e4a",  # mai tri
-        "\uf70d": "\u0e4b",  # mai chattawa
-        "\uf70e": "\u0e4c",  # thanthakhat (karan)
-        "\uf700": "\u0e38",  # sara u
-        "\uf701": "\u0e39",  # sara uu
-        "\uf702": "\u0e3a",  # phinthu
-    }))
-    text = unicodedata.normalize("NFC", text)
-    # Fix decomposed sara am: nikhahit + sara aa -> sara am
-    text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
-    # Fix tone mark before sara am -> sara am + tone mark
-    text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "ำ\\1", text)
-    # Fix tone mark before below-vowel
-    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
+    text = normalize_thai_unicode(text)
     # Remove file content tags if any
     text = re.sub(r"<file_content\b[^>]*>.*?</file_content>", "", text, flags=re.DOTALL)
     text = re.sub(r"<file_content\b[^>]*>.*$", "", text, flags=re.DOTALL)

@@ -79,16 +79,12 @@ class TextBox:
 
 
 # --------------------------------------------------------------- text helpers
+from core.utils.cleaners import normalize_thai_unicode
+
+
 def normalize_pdf_text(text: str) -> str:
     """Fix Thai PDF glyph artifacts (PUA tone marks, split sara am, mark order)."""
-    text = text.translate(str.maketrans({
-        "\uf70a": "\u0e48", "\uf70b": "\u0e49", "\uf70e": "\u0e4c",
-    }))
-    text = unicodedata.normalize("NFC", text)
-    text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
-    text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "ำ\\1", text)
-    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
-    return text.strip()
+    return normalize_thai_unicode(text).strip()
 
 
 def text_layer_is_corrupt(text: str) -> bool:
