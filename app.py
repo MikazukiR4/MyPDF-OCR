@@ -31,6 +31,14 @@ from core.exceptions import with_api_retry, OCRError, TransientOCRError, Permane
 
 load_dotenv()
 load_dotenv(".env.typhoon", override=False)
+# --- Session State Initialization ---
+if 'ocr_text' not in st.session_state:
+    st.session_state['ocr_text'] = ""
+if 'pdf_bytes' not in st.session_state:
+     st.session_state['pdf_bytes'] = None
+if 'ocr_result_editor' not in st.session_state:
+    st.session_state['ocr_result_editor'] = ""
+# ---------------------------------
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_PAGES = 100
@@ -57,8 +65,6 @@ def render_page(document: object, page_number: int, mode: str = "best") -> bytes
 
     page = document[page_number - 1]
     if mode == "fast":
-        # 150 DPI is sufficient for the fast OCR path and avoids rendering
-        # unnecessarily large images before preprocessing.
         pixmap = page.get_pixmap(dpi=150, alpha=False)
         return pixmap.tobytes("png")
     width = max(1, page.rect.width)
@@ -71,13 +77,6 @@ def render_page(document: object, page_number: int, mode: str = "best") -> bytes
 
 @st.cache_data(show_spinner=False)
 def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
-    """Create a DOCX that preserves the PDF's visual page layout.
-
-    Each PDF page is rendered as a full-page image in a matching DOCX section.
-    This keeps the original PDF as the source of truth so scanned text, tables,
-    columns, images, stamps, and rotated content remain visually faithful.
-    The resulting page images are not editable Word text.
-    """
     try:
         import pymupdf as fitz
     except ImportError:
@@ -113,8 +112,6 @@ def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
             section.header_distance = Inches(0)
             section.footer_distance = Inches(0)
 
-            # Render at approximately 200 DPI: readable Thai text and table
-            # lines without producing unnecessarily large DOCX files.
             scale = min(4.2, max(1.5, 200.0 / 72.0))
             pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
             image_stream = io.BytesIO(pixmap.tobytes("png"))
@@ -145,12 +142,6 @@ def export_pdf_editable_docx(
     ocr_text: str = "",
     page_numbers: tuple[int, ...] | None = None,
 ) -> tuple[bytes, dict]:
-    """Layered, editable DOCX (see docx_port.py): page picture behind real Word text boxes.
-
-    ocr_text is the final text shown in the app (Typhoon / Gemini / Tesseract) with its
-    "----- หน้า N -----" markers; docx_port aligns it onto each page line geometry, so
-    corrected text reaches the DOCX instead of a second, independent Tesseract pass.
-    """
     from docx_port import build_editable_docx
 
     return build_editable_docx(
@@ -165,7 +156,6 @@ def export_pdf_editable_docx(
 
 @st.cache_data(show_spinner=False)
 def export_pdf_flowing_docx(ocr_text: str = "") -> bytes:
-    """Clean, flowing Thai DOCX with proper typography, tables, and page breaks."""
     from docx_generator import create_flowing_docx
 
     return create_flowing_docx(ocr_text)
@@ -173,7 +163,6 @@ def export_pdf_flowing_docx(ocr_text: str = "") -> bytes:
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
-    """Convert to clean grayscale, upscale only if small, and suppress dotted-line/scan noise."""
     from PIL import Image, ImageFilter, ImageOps
 
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -195,7 +184,6 @@ def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
 
 
 def embedded_pdf_text(page: object) -> str:
-    """Read an existing PDF text layer before falling back to image OCR."""
     try:
         raw = page.get_text("text") or ""
     except Exception:
@@ -210,7 +198,6 @@ def typhoon_api_key() -> str:
 
 
 def available_ocr_engines() -> list[str]:
-    """Return only OCR engines that can actually run in this deployment."""
     engines = ["tesseract"] if tesseract_path() else []
     if typhoon_api_key():
         engines.insert(0, "typhoon")
@@ -218,7 +205,6 @@ def available_ocr_engines() -> list[str]:
 
 
 def usable_ocr_engine(engine: str) -> str:
-    """Prevent stale UI/session state from selecting Typhoon without a key."""
     if engine == "typhoon" and not typhoon_api_key():
         return "tesseract"
     return engine if engine in available_ocr_engines() else "tesseract"
@@ -226,7 +212,6 @@ def usable_ocr_engine(engine: str) -> str:
 
 @with_api_retry()
 def typhoon_transcribe(image_bytes: bytes) -> str:
-    """Use Typhoon OCR for Thai government documents and handwriting."""
     api_key = typhoon_api_key()
     if not api_key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า TYPHOON_OCR_API_KEY")
@@ -271,7 +256,6 @@ def gemini_api_key() -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def list_gemini_models() -> list[dict[str, object]]:
-    """Return model metadata available to this API key for generateContent."""
     api_key = gemini_api_key()
     if not api_key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
@@ -333,7 +317,6 @@ def format_token_limit(value: object) -> str:
 
 
 def gemini_model_profile(model_name: str) -> dict[str, object]:
-    """Provide an easy-to-read, approximate profile based on the model family."""
     name = model_name.lower()
     if "pro" in name:
         return {
@@ -376,12 +359,10 @@ def star_scale(score: object) -> str:
 
 
 def gemini_model_option_label(model_name: str) -> str:
-    """Show only the model name in the dropdown options."""
     return model_name
 
 
 def gemini_model_is_recommended(model_name: str) -> bool:
-    """Keep the main picker focused on text/image models suitable for PDF correction."""
     name = model_name.lower()
     excluded_terms = (
         "tts", "image", "audio", "transcribe", "robotics", "computer-use",
@@ -390,21 +371,7 @@ def gemini_model_is_recommended(model_name: str) -> bool:
     return ("flash" in name or "pro" in name) and not any(term in name for term in excluded_terms)
 
 
-def gemini_rating_html(label: str, score: object, description: str) -> str:
-    """Render a rating row with a hover tooltip explaining the 1-5 scale."""
-    return (
-        '<div class="gemini-rating-row" title="'
-        f'{description}'
-        '">'
-        f'<span class="gemini-rating-label">{label}</span>'
-        f'<span class="gemini-rating-stars">{star_scale(score)}</span>'
-        '<span class="gemini-rating-help">ⓘ</span>'
-        '</div>'
-    )
-
-
 def validate_gemini_guard(source_text: str, corrected: str) -> None:
-    """Ensure Gemini did not hallucinate, drop critical numbers, or alter text length wildly."""
     if not corrected or len(corrected) < max(10, round(len(source_text) * 0.40)):
         raise RuntimeError("Gemini ส่งข้อความแก้ไขกลับมาสั้นผิดปกติ จึงคงข้อความเดิมไว้")
     if len(corrected) > max(100, round(len(source_text) * 2.0)):
@@ -423,7 +390,6 @@ def validate_gemini_guard(source_text: str, corrected: str) -> None:
 
 @with_api_retry()
 def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
-    """Correct Thai PDF text using the page image as the source of truth."""
     api_key = gemini_api_key()
     if not api_key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
@@ -478,13 +444,6 @@ def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str
 
 @with_api_retry()
 def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> str:
-    """Correct a PDF using Gemini's native document understanding.
-
-    Sending the original PDF lets Gemini use its embedded text and page
-    layout instead of requiring one rendered PNG request per page. The local
-    OCR text is retained as a reference for characters that are difficult to
-    read from the document alone.
-    """
     api_key = gemini_api_key()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -542,12 +501,10 @@ PAGE_MARKER_RE = re.compile(r"^----- หน้า ([0-9]+)(?: \| .*?)? -----$", 
 
 
 def document_page_markers(text: str) -> list[int]:
-    """Extract ordered page markers from a document OCR result."""
     return [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(text or "")]
 
 
 def validate_document_markers(source_text: str, corrected_text: str) -> None:
-    """Reject Gemini output that loses, duplicates, or reorders page markers."""
     expected = document_page_markers(source_text)
     actual = document_page_markers(corrected_text)
     if not expected:
@@ -596,9 +553,6 @@ def _extract_page_text_once(
             "ไม่พบ Tesseract ในระบบ กรุณาติดตั้ง tesseract-ocr และ tesseract-ocr-tha"
         )
     prepared = preprocess_image(image_bytes, mode)
-    # Call the Tesseract executable directly. This avoids pytesseract's
-    # temporary-file decoding path, which can raise UnicodeDecodeError on
-    # Windows when Thai output contains mixed encodings.
     with tempfile.TemporaryDirectory(prefix="th_ocr_") as temp_dir:
         image_path = Path(temp_dir) / "page.png"
         image_path.write_bytes(prepared)
@@ -633,8 +587,6 @@ def _extract_page_text_once(
         raise RuntimeError(f"Tesseract ทำงานไม่สำเร็จ (รหัส {result.returncode}): {error}")
 
     raw = result.stdout
-    # Decode defensively so one page cannot fail only because of a Windows
-    # code-page mismatch.
     candidates = []
     for encoding in ("utf-8", "cp874", "tis-620"):
         decoded = raw.decode(encoding, errors="replace")
@@ -645,8 +597,6 @@ def _extract_page_text_once(
 
 
 class TesseractWorker:
-    """Reusable OCR worker with a Tesseract.js-like lifecycle."""
-
     def __init__(self, language: str, mode: str, psm: str, oem: str = OEM_LSTM_ONLY) -> None:
         self.command = tesseract_path()
         if not self.command:
@@ -667,7 +617,6 @@ class TesseractWorker:
 
 
 def parse_page_range(range_str: str, max_pages: int) -> list[int]:
-    """Parse string like '1-3, 5, 8-10' into sorted list of unique 1-indexed page numbers."""
     if not range_str or not range_str.strip():
         return list(range(1, max_pages + 1))
     pages = set()
@@ -732,7 +681,7 @@ def extract_pdf(
         errors: list[tuple[int | None, str]] = []
         failed_images: dict[int, bytes] = {}
         worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
-        gemini_document_mode = use_gemini_correction  # Removed redundant file size check; upstream already raises if too large (line 890-891)
+        gemini_document_mode = use_gemini_correction
 
         def publish_page() -> None:
             if page_callback is not None:
@@ -753,13 +702,11 @@ def extract_pdf(
 
                 def recognize_page(page_number: int) -> tuple[int, str, str, bytes]:
                     image_bytes = page_images[page_number]
-                    # Step 0: Check per-page cache
                     if page_cache and page_number in page_cache:
                         cached_text, cached_method = page_cache[page_number]
                         if cached_text:
                             return page_number, cached_text, f"{cached_method} (cached)", image_bytes
 
-                    # Step 1: Check embedded text layer
                     page_obj = document[page_number - 1]
                     embedded = embedded_pdf_text(page_obj)
                     if embedded and thai_text_quality_score(embedded) >= 0.70:
@@ -767,13 +714,11 @@ def extract_pdf(
                             page_cache[page_number] = (embedded, "embedded text")
                         return page_number, embedded, "embedded text", image_bytes
 
-                    # Step 2: Run primary OCR engine
                     method = engine
                     if engine == "typhoon":
                         text = typhoon_transcribe(image_bytes)
                     else:
                         text = worker.recognize(image_bytes)
-                        # Step 3: Fallback chain to Typhoon if Tesseract produced poor quality and Typhoon API key is available
                         if thai_text_quality_score(text) < 0.55 and typhoon_api_key():
                             try:
                                 typhoon_text = typhoon_transcribe(image_bytes)
@@ -878,7 +823,6 @@ def extract_pdf(
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_HEIGHT) -> None:
-    """Show a PDF viewer with built-in fit, zoom-in, and zoom-out controls."""
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
@@ -1003,7 +947,6 @@ def inject_css() -> None:
         .small-note { color:#64748b; font-size:13px; }
         .pdf-empty { height:var(--panel-height); box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:2rem; border:1px dashed #64748b; border-radius:12px; background:#020617; color:#94a3b8; text-align:center; line-height:1.7; }
         .ocr-live-preview { height:var(--panel-height); box-sizing:border-box; padding:16px; border:2px solid #64748b; border-radius:10px; background:#020617; color:#ffffff; font:16px/1.7 "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:hidden; overflow-y:auto; }
-        /* Dark mode: keep every surface and text role readable together. */
         .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] { background:#0b1220 !important; color:#f8fafc !important; }
         .block-container { color:#f8fafc !important; }
         .ocr-card { background:#111827 !important; border-color:#334155 !important; box-shadow:0 8px 24px rgba(0,0,0,.28) !important; }
@@ -1117,8 +1060,6 @@ with st.sidebar:
     oem = OEM_LSTM_ONLY
     gemini_key_available = bool(gemini_api_key())
     if not gemini_key_available:
-        # Reset a stale browser/session value so a previous checked state
-        # cannot enable a provider that is unavailable in this deployment.
         st.session_state["use_gemini_correction"] = False
     elif "use_gemini_correction" not in st.session_state:
         st.session_state["use_gemini_correction"] = True
@@ -1194,7 +1135,8 @@ uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
 uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
 previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
 if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
-    st.session_state.pop("ocr_text", None)
+    st.session_state["ocr_text"] = ""
+    st.session_state["ocr_result_editor"] = ""
     st.session_state.pop("ocr_status", None)
     st.session_state.pop("docx_bytes", None)
     st.session_state.pop("docx_result_fingerprint", None)
@@ -1311,10 +1253,21 @@ if run:
             page_cache=page_cache,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
+        
+        # บันทึกค่าลง session_state ให้ครบถ้วนและเชื่อมตรงกับ editor key
         st.session_state["ocr_text"] = text
+        st.session_state["ocr_result_editor"] = text
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
         st.session_state["target_pages_processed"] = target_pages_to_process
-        ocr_preview.text_area("ผล OCR", text, height=OCR_EDITOR_HEIGHT, key="ocr_result_editor")
+        
+        # แสดงผลใน text_area ทันทีหลังรันเสร็จโดยดึงจาก session_state
+        ocr_preview.text_area(
+            "ผล OCR",
+            value=st.session_state["ocr_result_editor"],
+            height=OCR_EDITOR_HEIGHT,
+            key="ocr_result_editor"
+        )
+        
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
         if effective_use_gemini and document_errors:
@@ -1350,19 +1303,20 @@ if run:
                         )
     except Exception as exc:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
-        st.session_state.pop("ocr_text", None)
-        st.session_state.pop("ocr_result_fingerprint", None)
+        st.session_state["ocr_text"] = ""
+        st.session_state["ocr_result_editor"] = ""
         st.session_state["ocr_status"] = "failed"
         with st.expander("รายละเอียดข้อผิดพลาด", expanded=False):
             st.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
 
-# Keep the OCR editor visible by default, including before the first OCR run.
-# This gives users a stable target for the result and keeps the two panels from
-# jumping when OCR starts or when the selected file changes.
+# กรณีที่ไม่ได้กดปุ่มรัน ให้ดึงค่าจาก session_state มาแสดงผลค้างไว้เสมอ
 if not run:
+    if not st.session_state.get("ocr_result_editor") and st.session_state.get("ocr_text"):
+        st.session_state["ocr_result_editor"] = st.session_state["ocr_text"]
+
     ocr_preview.text_area(
         "ผล OCR",
-        st.session_state.get("ocr_text", ""),
+        value=st.session_state.get("ocr_result_editor", ""),
         height=OCR_EDITOR_HEIGHT,
         key="ocr_result_editor",
     )
@@ -1370,7 +1324,7 @@ if not run:
 if (
     uploaded is not None
     and st.session_state.get("ocr_result_fingerprint") == uploaded_fingerprint
-    and st.session_state.get("ocr_text")
+    and (st.session_state.get("ocr_text") or st.session_state.get("ocr_result_editor"))
 ):
     st.markdown("---")
     st.markdown("### 📥 ดาวน์โหลดผลลัพธ์ (DOCX)")

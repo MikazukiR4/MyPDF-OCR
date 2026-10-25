@@ -1,6 +1,0 @@
-streamlit[pdf]
-pymupdf
-pillow
-python-dotenv
-python-docx
-tenacity
