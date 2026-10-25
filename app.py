@@ -894,24 +894,15 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
         <style>
           html, body {{ width:100%; height:100%; min-height:100%; margin:0; }}
           body {{ overflow:hidden; background:#172554; }}
-          #viewer-shell {{ position:relative; width:100%; height:100%; min-height:0; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }}
+          #viewer-shell {{ position:relative; width:100%; height:100%; min-height:0; overflow:auto; }}
           #pdf-viewer {{ width:100%; height:100%; min-height:0; }}
           #zoom-controls {{ position:absolute; top:72px; right:12px; z-index:20; display:flex; align-items:center; gap:4px; padding:4px; border-radius:10px; background:rgba(15,23,42,.88); box-shadow:0 3px 12px rgba(0,0,0,.28); }}
-          #zoom-controls button {{ width:34px; height:32px; border:0; border-radius:7px; background:#334155; color:#fff; font-size:20px; line-height:1; cursor:pointer; }}
-          #zoom-controls button:hover {{ background:#475569; }}
-          #zoom-level {{ min-width:52px; color:#fff; font:600 12px system-ui,sans-serif; text-align:center; }}
           #viewer-error {{ padding:1rem; color:#fecaca; font:14px sans-serif; }}
         </style>
       </head>
       <body>
         <div id="viewer-shell">
           <div id="pdf-viewer" aria-label="ตัวอย่าง PDF: {safe_name}"></div>
-          <div id="zoom-controls" aria-label="ควบคุมการซูม PDF">
-            <button id="zoom-out" type="button" aria-label="ซูมออก" title="ซูมออก">−</button>
-            <span id="zoom-level" aria-live="polite">100%</span>
-            <button id="zoom-in" type="button" aria-label="ซูมเข้า" title="ซูมเข้า">+</button>
-            <button id="zoom-fit" type="button" aria-label="พอดีหน้าต่าง" title="พอดีหน้าต่าง">Fit</button>
-          </div>
         </div>
         <div id="viewer-error" role="alert" hidden></div>
         <script type="module">
@@ -923,19 +914,11 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
           let zoom = 1;
           function applyZoom(nextZoom) {{
             zoom = Math.max(0.75, Math.min(2.5, nextZoom));
-            // CSS zoom changes the layout width of EmbedPDF and makes the page
-            // shrink when zooming in. Transform keeps the viewer's layout box
-            // stable while enlarging the rendered document predictably.
-            target.style.zoom = "1";
-            target.style.transform = `scale(${{zoom}})`;
-            target.style.transformOrigin = "top left";
+            target.style.zoom = String(zoom);
             target.style.width = "100%";
             target.style.height = "100%";
             zoomLevel.textContent = `${{Math.round(zoom * 100)}}%`;
           }}
-          document.getElementById("zoom-out").addEventListener("click", () => applyZoom(zoom - 0.1));
-          document.getElementById("zoom-in").addEventListener("click", () => applyZoom(zoom + 0.1));
-          document.getElementById("zoom-fit").addEventListener("click", () => applyZoom(1));
           function showError(message) {{
             errorTarget.textContent = message;
             errorTarget.hidden = false;
