@@ -26,6 +26,9 @@ from core.utils.cleaners import (
     clean_simple_text,
     thai_text_quality_score,
     normalize_thai_unicode,
+    preprocess_handwriting,
+    HANDWRITING_PROMPT,
+    has_repetition_loop,
 )
 from core.exceptions import with_api_retry, OCRError, TransientOCRError, PermanentOCRError
 
@@ -497,6 +500,51 @@ def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> s
     return clean_thai_ocr_text(corrected)
 
 
+@with_api_retry()
+def gemini_read_handwriting(image_bytes: bytes, model: str) -> str:
+    """ให้ Gemini อ่านลายมือภาษาไทยจากภาพโดยตรง"""
+    api_key = gemini_api_key()
+    if not api_key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    payload = {
+        "contents": [{"parts": [
+            {"text": HANDWRITING_PROMPT},
+            {"inline_data": {"mime_type": "image/png",
+                             "data": base64.b64encode(image_bytes).decode("ascii")}},
+        ]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 8192,
+        },
+    }
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        text = "\n".join(
+            p["text"] for p in result["candidates"][0]["content"]["parts"] if p.get("text")
+        ).strip()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"เชื่อมต่อ Gemini ไม่สำเร็จ: {exc.reason}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Gemini ไม่ส่งข้อความกลับมา") from exc
+
+    if not text:
+        raise RuntimeError("Gemini ส่งข้อความว่างกลับมา")
+    if has_repetition_loop(text):
+        raise RuntimeError("ผลลัพธ์วนซ้ำผิดปกติ (อาจ hallucinate)")
+    return text
+
+
 PAGE_MARKER_RE = re.compile(r"^----- หน้า ([0-9]+)(?: \| .*?)? -----$", re.MULTILINE)
 
 
@@ -650,6 +698,7 @@ def extract_pdf(
     page_callback: object | None = None,
     pages_to_process: list[int] | None = None,
     page_cache: dict[int, tuple[str, str]] | None = None,
+    handwriting_mode: bool = False,
 ) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
     try:
         import pymupdf as fitz
@@ -681,7 +730,7 @@ def extract_pdf(
         errors: list[tuple[int | None, str]] = []
         failed_images: dict[int, bytes] = {}
         worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
-        gemini_document_mode = use_gemini_correction
+        gemini_document_mode = use_gemini_correction and not handwriting_mode
 
         def publish_page() -> None:
             if page_callback is not None:
@@ -701,13 +750,55 @@ def extract_pdf(
                     page_images[page_number] = render_page(document, page_number, mode)
 
                 def recognize_page(page_number: int) -> tuple[int, str, str, bytes]:
+                    def cache_key(page_number: int) -> tuple:
+                        return (
+                            page_number,
+                            engine,
+                            mode,
+                            psm,
+                            language,
+                            bool(use_gemini_correction),
+                            gemini_model,
+                            bool(handwriting_mode),
+                        )
+
                     image_bytes = page_images[page_number]
-                    if page_cache and page_number in page_cache:
-                        cached_text, cached_method = page_cache[page_number]
+                    if page_cache and cache_key(page_number) in page_cache:
+                        cached_text, cached_method = page_cache[cache_key(page_number)]
                         if cached_text:
                             return page_number, cached_text, f"{cached_method} (cached)", image_bytes
 
                     page_obj = document[page_number - 1]
+
+                    if handwriting_mode:
+                        text, method = "", ""
+                        if gemini_api_key():
+                            try:
+                                text = gemini_read_handwriting(
+                                    preprocess_handwriting(image_bytes, binarize=False), gemini_model
+                                )
+                                method = "gemini-handwriting"
+                            except Exception as exc:
+                                errors.append((page_number, f"Gemini อ่านลายมือไม่สำเร็จ: {exc}"))
+                        if not text and engine == "typhoon" and typhoon_api_key():
+                            try:
+                                t = typhoon_transcribe(preprocess_handwriting(image_bytes, binarize=False))
+                                if t and not has_repetition_loop(t):
+                                    text, method = t, "typhoon-handwriting"
+                            except Exception as exc:
+                                errors.append((page_number, f"Typhoon อ่านลายมือไม่สำเร็จ: {exc}"))
+                        if not text:
+                            text = worker.recognize(
+                                preprocess_handwriting(image_bytes, binarize=True),
+                                skip_preprocess=True,
+                            ) if worker else ""
+                            method = "tesseract-handwriting"
+                        if not text:
+                            raise RuntimeError("อ่านลายมือไม่ได้ทุก engine")
+                        if page_cache is not None:
+                            page_cache[cache_key(page_number)] = (text, method)
+                        return page_number, text, method, image_bytes
+
                     embedded = embedded_pdf_text(page_obj)
                     
                     # 🔍 ระบบกรองข้อความขยะ (Garbage Filter) ป้องกัน Font Encoding เพี้ยน
@@ -722,7 +813,7 @@ def extract_pdf(
 
                     if embedded and not is_garbage and thai_text_quality_score(embedded) >= 0.70:
                         if page_cache is not None:
-                            page_cache[page_number] = (embedded, "embedded text")
+                            page_cache[cache_key(page_number)] = (embedded, "embedded text")
                         return page_number, embedded, "embedded text", image_bytes
 
                     method = engine
@@ -742,12 +833,12 @@ def extract_pdf(
                     if not text:
                         if embedded and not is_garbage:
                             if page_cache is not None:
-                                page_cache[page_number] = (embedded, "embedded text (fallback)")
+                                page_cache[cache_key(page_number)] = (embedded, "embedded text (fallback)")
                             return page_number, embedded, "embedded text (fallback)", image_bytes
                         raise RuntimeError("OCR engine ส่งข้อความว่างกลับมา")
 
                     if page_cache is not None:
-                        page_cache[page_number] = (text, method)
+                        page_cache[cache_key(page_number)] = (text, method)
                     return page_number, text, method, image_bytes
 
                 page_data: dict[int, tuple[str, str, bytes | None]] = {}
@@ -769,6 +860,7 @@ def extract_pdf(
                     for page_number, (text, method, image_bytes) in page_data.items()
                     if use_gemini_correction
                     and not gemini_document_mode
+                    and not handwriting_mode
                     and not method.startswith("embedded")
                     and image_bytes is not None
                     and text
@@ -790,7 +882,7 @@ def extract_pdf(
                                     _, _, image_bytes = page_data[page_number]
                                     page_data[page_number] = (corrected_text, "Gemini corrected", image_bytes)
                                     if page_cache is not None:
-                                        page_cache[page_number] = (corrected_text, "Gemini corrected")
+                                        page_cache[cache_key(page_number)] = (corrected_text, "Gemini corrected")
                                 except Exception as correction_error:
                                     errors.append((page_number, f"Gemini ตรวจแก้ไม่สำเร็จ: {correction_error}"))
 
@@ -1054,10 +1146,20 @@ with st.sidebar:
     mode = st.selectbox(
         "การประมวลผลภาพสำหรับ OCR",
         ["best", "fast"],
-        index=1,
+        index=0,
         format_func=lambda value: "คมชัดสูง" if value == "best" else "เร็ว",
         help="มีผลกับ Tesseract เท่านั้น ระบบจะอ่านข้อความจากภาพเพื่อหลีกเลี่ยง text layer ของ PDF ที่อาจถอดภาษาไทยผิด",
     )
+    handwriting_mode = st.checkbox(
+        "เอกสารลายมือ",
+        value=False,
+        key="handwriting_mode",
+        help="ข้าม text layer ของ PDF และให้ AI อ่านภาพโดยตรง ใช้กับลายมือไทยที่ Tesseract อ่านไม่ได้",
+    )
+    if handwriting_mode:
+        mode = "best"
+        if not gemini_api_key() and not typhoon_api_key():
+            st.warning("ไม่มี Gemini/Typhoon key — ระบบจะใช้ Tesseract ซึ่งอ่านลายมือได้ไม่แม่น")
     if engine == "tesseract":
         psm = st.selectbox(
             "รูปแบบหน้าเอกสาร",
@@ -1262,6 +1364,7 @@ if run:
             page_callback=publish_ocr_preview,
             pages_to_process=target_pages_to_process,
             page_cache=page_cache,
+            handwriting_mode=handwriting_mode,
         )
         progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         
