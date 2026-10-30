@@ -1,0 +1,2125 @@
+﻿diff --git a/app.py b/app.py
+index 001b209..c39d21e 100644
+--- a/app.py
++++ b/app.py
+@@ -1,10 +1,11 @@
+-import io
+-import hashlib
+-import csv
+ import base64
+-import json
+ from concurrent.futures import ThreadPoolExecutor
++import hashlib
++import io
++import json
+ import os
++import pathlib
++from pathlib import Path
+ import re
+ import shutil
+ import subprocess
+@@ -13,12 +14,11 @@ import unicodedata
+ import urllib.error
+ import urllib.parse
+ import urllib.request
+-from pathlib import Path
+ 
++from dotenv import load_dotenv
++import streamlit as strlit
+ import streamlit as st
+ import streamlit.components.v1 as components
+-from dotenv import load_dotenv
+-
+ 
+ load_dotenv()
+ load_dotenv(".env.typhoon", override=False)
+@@ -29,487 +29,547 @@ GEMINI_MAX_WORKERS = 3
+ TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
+ 
+ OEM_LSTM_ONLY = "1"
+-
+ PSM_VALUES = ["3", "6", "4"]
+ 
+-TYPHOON_BASE_URL = os.getenv("TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1").rstrip("/")
++TYPHOON_BASE_URL = os.getenv(
++    "TYPHOON_BASE_URL", "https://api.opentyphoon.ai/v1"
++).rstrip("/")
+ TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
+ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
++
++
+ def render_page(document: object, page_number: int, mode: str = "best") -> bytes:
+-    """Render one page from an open PyMuPDF document to PNG."""
+-    try:
+-        import pymupdf as fitz
+-    except ImportError:
+-        import fitz
+-
+-    page = document[page_number - 1]
+-    if mode == "fast":
+-        # 150 DPI is sufficient for the fast OCR path and avoids rendering
+-        # unnecessarily large images before preprocessing.
+-        pixmap = page.get_pixmap(dpi=150, alpha=False)
+-        return pixmap.tobytes("png")
+-    width = max(1, page.rect.width)
+-    target_width = 2400
+-    minimum_scale = 2.5
+-    scale = min(4.2, max(minimum_scale, target_width / width))
+-    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
++  """Render one page from an open PyMuPDF document to PNG."""
++  try:
++    import pymupdf as fitz
++  except ImportError:
++    import fitz
++
++  page = document[page_number - 1]
++  if mode == "fast":
++    pixmap = page.get_pixmap(dpi=150, alpha=False)
+     return pixmap.tobytes("png")
+-
++  width = max(1, page.rect.width)
++  target_width = 2400
++  minimum_scale = 2.5
++  scale = min(4.2, max(minimum_scale, target_width / width))
++  pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
++  return pixmap.tobytes("png")
+ 
+ 
+ def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
+-    """Convert to clean grayscale, upscale only if small, and suppress dotted-line/scan noise."""
+-    from PIL import Image, ImageFilter, ImageOps
+-
+-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+-    target_width = 1500 if mode == "fast" else 2200
+-    if image.width < target_width:
+-        scale = min(2.5, target_width / max(1, image.width))
+-        image = image.resize(
+-            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+-            Image.Resampling.LANCZOS,
+-        )
+-    image = ImageOps.grayscale(image)
+-    if mode == "best":
+-        image = ImageOps.autocontrast(image, cutoff=0.3)
+-        image = image.filter(ImageFilter.SHARPEN)
+-        image = image.point(lambda p: 255 if p > 235 else (0 if p < 45 else p))
+-    output = io.BytesIO()
+-    image.save(output, format="PNG", optimize=True)
+-    return output.getvalue()
++  """Convert to clean grayscale, upscale only if small, and suppress dotted-line/scan noise."""
++  from PIL import Image, ImageFilter, ImageOps
++
++  image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
++  target_width = 1500 if mode == "fast" else 2200
++  if image.width < target_width:
++    scale = min(2.5, target_width / max(1, image.width))
++    image = image.resize(
++        (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
++        Image.Resampling.LANCZOS,
++    )
++  image = ImageOps.grayscale(image)
++  if mode == "best":
++    image = ImageOps.autocontrast(image, cutoff=0.3)
++    image = image.filter(ImageFilter.SHARPEN)
++    image = image.point(lambda p: 255 if p > 235 else (0 if p < 45 else p))
++  output = io.BytesIO()
++  image.save(output, format="PNG", optimize=True)
++  return output.getvalue()
+ 
+ 
+ def clean_thai_ocr_text(text: str) -> str:
+-    """Normalize Thai text and remove common floating-diacritic OCR garbage."""
+-    if not text:
+-        return ""
+-    # Some Thai PDF fonts expose tone marks through Private Use Area glyphs.
+-    # Convert only the mappings observed in the embedded text layer so that
+-    # normal Unicode text is left unchanged.
+-    text = text.translate(str.maketrans({
+-        "\uf70a": "\u0e48",  # mai ek: เน
+-        "\uf70b": "\u0e49",  # mai tho: เน
+-        "\uf70e": "\u0e4c",  # thanthakhat: เน
+-    }))
+-    text = unicodedata.normalize("NFC", text)
+-    text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
+-    text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "เธณ\\1", text)
+-    # A few legacy Thai fonts place a tone mark before a below vowel
+-    # (for example เธเนเธน). Put the tone mark after the vowel (เธเธนเน).
+-    text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
+-    text = re.sub(r"<file_content\b[^>]*>.*?</file_content>", "", text, flags=re.DOTALL)
+-    text = re.sub(r"<file_content\b[^>]*>.*$", "", text, flags=re.DOTALL)
+-
+-    output = []
+-    for line in text.splitlines():
+-        compact = re.sub(r"\s+", "", line)
+-        tokens = line.split()
+-        thai_letters = len(re.findall(r"[เธ-เธฎ]", compact))
+-        ascii_letters = len(re.findall(r"[A-Za-z]", compact))
+-        symbols = len(re.findall(r"[=/_~^|<>*+`\"'โ€โ€โ€โ€.,:;!?-]", compact))
+-        short_tokens = sum(len(token) <= 2 for token in tokens)
+-        is_floating_line = (
+-            len(tokens) >= 3
+-            and short_tokens / len(tokens) >= 0.75
+-            and thai_letters <= 3
+-        ) or (
+-            len(compact) <= 8
+-            and thai_letters <= 1
+-            and (ascii_letters or symbols)
+-            and not re.fullmatch(r"[0-9เน-เน.,/-]+", compact or " ")
+-        )
+-        if compact and not is_floating_line:
+-            output.append(re.sub(r"[ \t]{3,}", "  ", line.rstrip()))
+-
+-    text = "\n".join(output)
+-    replacements = (
+-        (r"(?m)^(\s*)เน€เธฃเธญเธ(\s+)", r"\1เน€เธฃเธทเนเธญเธ\2"),
+-        (r"(?m)^(\s*)(?:เธญเธฒเธเธ–เธ|เธญเธฒเธเธ–เธถเธ|เธญเนเธฒเธเธ–เธ)(\s+)", r"\1เธญเนเธฒเธเธ–เธถเธ\2"),
+-        (r"(?m)^(\s*)(?:เธชเธดเธเธ—เธตเนเธชเนเธเธกเธฒเธ”เนเธงเธข|เธชเธดเธเธ—เธตเธชเนเธเธกเธฒเธ”เนเธงเธข|เธชเธดเนเธเธ—เธตเนเธชเธเธกเธฒเธ”เธงเธข)(\s+)", r"\1เธชเธดเนเธเธ—เธตเนเธชเนเธเธกเธฒเธ”เนเธงเธข\2"),
+-        (r"(?:เธซเธเธเธชเธญเธเธเธซเธงเธ”|เธซเธเธเธชเธทเธญเธเธเธซเธงเธ”|เธซเธเธเธชเธญเธเธฑเธเธซเธงเธฑเธ”|เธซเธเธฑเธเธชเธทเธญเธเธเธซเธงเธ”)", "เธซเธเธฑเธเธชเธทเธญเธเธฑเธเธซเธงเธฑเธ”"),
+-        (r"(\s)เธ—(\s+(?:เธจเธ|เธชเธช|เธกเธ—|เธเธ|เธเธฃ|เธญเธง|เธเธก|เธชเธ|เธเธฉ|เธฃเธ|เธขเธ|เธ—เธช|เธงเธ)\s+[เน-เน0-9])", r"\1เธ—เธตเน\2"),
+-        (r"(?:เธฅเธเธงเธฑเธเธ—|เธฅเธเธงเธเธ—|เธฅเธเธงเธเธ—เธตเน)(\s+)", r"เธฅเธเธงเธฑเธเธ—เธตเน\1"),
+-        (r"(?<=เธฅเธเธงเธฑเธเธ—เธตเน\s)mo(?=\s+[เธ-เน])", "เน“เน"),
+-        (r"(?:เธเธฃเธฐเธเธณเธเธเธเธเธฃเธฐเธกเธฒเธ“|เธเธฃเธฐเธเนเธฒเธเธเธเธเธฃเธฐเธกเธฒเธ“)", "เธเธฃเธฐเธเธณเธเธตเธเธเธเธฃเธฐเธกเธฒเธ“"),
+-        (r"(?:we|wa|w\.เธจ|เธ\.เธ|เธ\.เธจ)\.\s*(?=[เน-เน]{4}|\d{4})", "เธ.เธจ. "),
+-        (r"เธเธฒเธฃเธเธฑเธเน€เธเธฅเธทเธญเธ", "เธเธฒเธฃเธเธฑเธเน€เธเธฅเธทเนเธญเธ"),
+-        (r"เนเธเธเธฒเธฃเธเธต(?=\s|$)", "เนเธเธเธฒเธฃเธเธตเน"),
+-        (r"เนเธเธชเนเธงเธ(?:เธ—เธตเน€เธเธตเธขเธงเธเนเธญเธ|เธ—เธตเนเน€เธเธตเธขเธงเธเนเธญเธ|เธ—เธตเน€เธเธตเนเธขเธงเธเนเธญเธ)", "เนเธเธชเนเธงเธเธ—เธตเนเน€เธเธตเนเธขเธงเธเนเธญเธ"),
+-        (r"(?:เธญเธณเน€เธเธญ|เธญเนเธฒเน€เธเธญ)", "เธญเธณเน€เธ เธญ"),
++  """Normalize Thai text and remove common floating-diacritic OCR garbage."""
++  if not text:
++    return ""
++  text = text.translate(
++      str.maketrans({
++          "\uf70a": "\u0e48",  # mai ek: เน
++          "\uf70b": "\u0e49",  # mai tho: เน
++          "\uf70e": "\u0e4c",  # thanthakhat: เน
++      })
++  )
++  text = unicodedata.normalize("NFC", text)
++  text = re.sub(r"\u0e4d\s*\u0e32", "\u0e33", text)
++  text = re.sub(r"([\u0e48-\u0e4b])\u0e33", "เธณ\\1", text)
++  text = re.sub(r"([\u0e48-\u0e4b])([\u0e38-\u0e3a])", r"\2\1", text)
++  text = re.sub(r"<file_content\b[^>]*>.*?</file_content>", "", text, flags=re.DOTALL)
++  text = re.sub(r"<file_content\b[^>]*>.*$", "", text, flags=re.DOTALL)
++
++  output = []
++  for line in text.splitlines():
++    compact = re.sub(r"\s+", "", line)
++    tokens = line.split()
++    thai_letters = len(re.findall(r"[เธ-เธฎ]", compact))
++    ascii_letters = len(re.findall(r"[A-Za-z]", compact))
++    symbols = len(re.findall(r"[=/_~^|<>*+`\"'โ€โ€โ€โ€.,:;!?-]", compact))
++    short_tokens = sum(len(token) <= 2 for token in tokens)
++    is_floating_line = (
++        len(tokens) >= 3
++        and short_tokens / len(tokens) >= 0.75
++        and thai_letters <= 3
++    ) or (
++        len(compact) <= 8
++        and thai_letters <= 1
++        and (ascii_letters or symbols)
++        and not re.fullmatch(r"[0-9เน-เน.,/-]+", compact or " ")
+     )
+-    for pattern, replacement in replacements:
+-        text = re.sub(pattern, replacement, text)
+-    return re.sub(r"\n{3,}", "\n\n", text).strip()
++    if compact and not is_floating_line:
++      output.append(re.sub(r"[ \t]{3,}", "  ", line.rstrip()))
++
++  text = "\n".join(output)
++  replacements = (
++      (r"(?m)^(\s*)เน€เธฃเธญเธ(\s+)", r"\1เน€เธฃเธทเนเธญเธ\2"),
++      (r"(?m)^(\s*)(?:เธญเธฒเธเธ–เธ|เธญเธฒเธเธ–เธถเธ|เธญเนเธฒเธเธ–เธ)(\s+)", r"\1เธญเนเธฒเธเธ–เธถเธ\2"),
++      (r"(?m)^(\s*)(?:เธชเธดเธเธ—เธตเนเธชเนเธเธกเธฒเธ”เนเธงเธข|เธชเธดเธเธ—เธตเธชเนเธเธกเธฒเธ”เนเธงเธข|เธชเธดเนเธเธ—เธตเนเธชเธเธกเธฒเธ”เธงเธข)(\s+)", r"\1เธชเธดเนเธเธ—เธตเนเธชเนเธเธกเธฒเธ”เนเธงเธข\2"),
++      (r"(?:เธซเธเธเธชเธญเธเธเธซเธงเธ”|เธซเธเธเธชเธทเธญเธเธเธซเธงเธ”|เธซเธเธเธชเธญเธเธฑเธเธซเธงเธฑเธ”|เธซเธเธฑเธเธชเธทเธญเธเธเธซเธงเธ”)", "เธซเธเธฑเธเธชเธทเธญเธเธฑเธเธซเธงเธฑเธ”"),
++      (r"(\s)เธ—(\s+(?:เธจเธ|เธชเธช|เธกเธ—|เธเธ|เธเธฃ|เธญเธง|เธเธก|เธชเธ|เธเธฉ|เธฃเธ|เธขเธ|เธ—เธช|เธงเธ)\s+[เน-เน0-9])", r"\1เธ—เธตเน\2"),
++      (r"(?:เธฅเธเธงเธฑเธเธ—|เธฅเธเธงเธเธ—|เธฅเธเธงเธเธ—เธตเน)(\s+)", r"เธฅเธเธงเธฑเธเธ—เธตเน\1"),
++      (r"(?<=เธฅเธเธงเธฑเธเธ—เธตเน\s)mo(?=\s+[เธ-เน])", "เน“เน"),
++      (r"(?:เธเธฃเธฐเธเธณเธเธเธเธเธฃเธฐเธกเธฒเธ“|เธเธฃเธฐเธเนเธฒเธเธเธเธเธฃเธฐเธกเธฒเธ“)", "เธเธฃเธฐเธเธณเธเธตเธเธเธเธฃเธฐเธกเธฒเธ“"),
++      (r"(?:we|wa|w\.เธจ|เธ\.เธ|เธ\.เธจ)\.\s*(?=[เน-เน]{4}|\d{4})", "เธ.เธจ. "),
++      (r"เธเธฒเธฃเธเธฑเธเน€เธเธฅเธทเธญเธ", "เธเธฒเธฃเธเธฑเธเน€เธเธฅเธทเนเธญเธ"),
++      (r"เนเธเธเธฒเธฃเธเธต(?=\s|$)", "เนเธเธเธฒเธฃเธเธตเน"),
++      (r"เนเธเธชเนเธงเธ(?:เธ—เธตเน€เธเธตเธขเธงเธเนเธญเธ|เธ—เธตเนเน€เธเธตเธขเธงเธเนเธญเธ|เธ—เธตเน€เธเธตเนเธขเธงเธเนเธญเธ)", "เนเธเธชเนเธงเธเธ—เธตเนเน€เธเธตเนเธขเธงเธเนเธญเธ"),
++      (r"(?:เธญเธณเน€เธเธญ|เธญเนเธฒเน€เธเธญ)", "เธญเธณเน€เธ เธญ"),
++  )
++  for pattern, replacement in replacements:
++    text = re.sub(pattern, replacement, text)
++  return re.sub(r"\n{3,}", "\n\n", text).strip()
+ 
+ 
+ def embedded_pdf_text(page: object) -> str:
+-    """Read an existing PDF text layer before falling back to image OCR."""
+-    try:
+-        raw = page.get_text("text") or ""
+-    except Exception:
+-        return ""
+-    raw = re.sub(r"[ \t]+", " ", raw)
+-    raw = re.sub(r"\n{3,}", "\n\n", raw)
+-    return clean_thai_ocr_text(raw.strip())
++  """Read an existing PDF text layer before falling back to image OCR."""
++  try:
++    raw = page.get_text("text") or ""
++  except Exception:
++    return ""
++  raw = re.sub(r"[ \t]+", " ", raw)
++  raw = re.sub(r"\n{3,}", "\n\n", raw)
++  return clean_thai_ocr_text(raw.strip())
+ 
+ 
+ def typhoon_api_key() -> str:
+-    return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
++  return os.getenv("TYPHOON_OCR_API_KEY") or os.getenv("TYPHOON_API_KEY") or ""
+ 
+ 
+ def available_ocr_engines() -> list[str]:
+-    """Return only OCR engines that can actually run in this deployment."""
+-    engines = ["tesseract"]
+-    if typhoon_api_key():
+-        engines.insert(0, "typhoon")
+-    return engines
++  """Return only OCR engines that can actually run in this deployment."""
++  engines = ["tesseract"]
++  if typhoon_api_key():
++    engines.insert(0, "typhoon")
++  return engines
+ 
+ 
+ def usable_ocr_engine(engine: str) -> str:
+-    """Prevent stale UI/session state from selecting Typhoon without a key."""
+-    if engine == "typhoon" and not typhoon_api_key():
+-        return "tesseract"
+-    return engine if engine in available_ocr_engines() else "tesseract"
++  """Prevent stale UI/session state from selecting Typhoon without a key."""
++  if engine == "typhoon" and not typhoon_api_key():
++    return "tesseract"
++  return engine if engine in available_ocr_engines() else "tesseract"
+ 
+ 
+ def typhoon_transcribe(image_bytes: bytes) -> str:
+-    """Use Typhoon OCR for Thai government documents and handwriting."""
+-    api_key = typhoon_api_key()
+-    if not api_key:
+-        raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ TYPHOON_OCR_API_KEY")
+-    from PIL import Image
+-
+-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+-    if max(image.size) > 1800:
+-        scale = 1800 / max(image.size)
+-        image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
+-    buffer = io.BytesIO()
+-    image.save(buffer, format="PNG")
+-    payload = {
+-        "model": TYPHOON_MODEL,
+-        "messages": [{"role": "user", "content": [
+-            {"type": "text", "text": "Extract all text exactly as written. Preserve Thai script, Thai numerals, and line breaks. Return only document text; do not describe images or signatures."},
+-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"}},
+-        ]}],
+-        "max_tokens": 8192,
+-        "temperature": 0.1,
+-        "top_p": 0.6,
+-        "repetition_penalty": 1.1,
+-    }
+-    request = urllib.request.Request(
+-        f"{TYPHOON_BASE_URL}/chat/completions",
+-        data=json.dumps(payload).encode("utf-8"),
+-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+-        method="POST",
++  """Use Typhoon OCR for Thai government documents and handwriting."""
++  api_key = typhoon_api_key()
++  if not api_key:
++    raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ TYPHOON_OCR_API_KEY")
++  from PIL import Image
++
++  image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
++  if max(image.size) > 1800:
++    scale = 1800 / max(image.size)
++    image = image.resize(
++        (round(image.width * scale), round(image.height * scale)),
++        Image.Resampling.LANCZOS,
+     )
+-    try:
+-        with urllib.request.urlopen(request, timeout=90) as response:
+-            result = json.loads(response.read().decode("utf-8"))
+-        return clean_thai_ocr_text(result["choices"][0]["message"]["content"] or "")
+-    except urllib.error.HTTPError as exc:
+-        raise RuntimeError(f"Typhoon OCR HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:300]}") from exc
+-    except (KeyError, IndexError, TypeError) as exc:
+-        raise RuntimeError("Typhoon OCR เนเธกเนเธชเนเธเธเนเธญเธเธงเธฒเธกเธเธฅเธฑเธเธกเธฒ") from exc
++  buffer = io.BytesIO()
++  image.save(buffer, format="PNG")
++  payload = {
++      "model": TYPHOON_MODEL,
++      "messages": [{
++          "role": "user",
++          "content": [
++              {
++                  "type": "text",
++                  "text": (
++                      "Extract all text exactly as written. Preserve Thai"
++                      " script, Thai numerals, and line breaks. Return only"
++                      " document text; do not describe images or signatures."
++                  ),
++              },
++              {
++                  "type": "image_url",
++                  "image_url": {
++                      "url": (
++                          "data:image/png;base64,"
++                          f"{base64.b64encode(buffer.getvalue()).decode('ascii')}"
++                      )
++                  },
++              },
++          ],
++      }],
++      "max_tokens": 8192,
++      "temperature": 0.1,
++      "top_p": 0.6,
++      "repetition_penalty": 1.1,
++  }
++  request = urllib.request.Request(
++      f"{TYPHOON_BASE_URL}/chat/completions",
++      data=json.dumps(payload).encode("utf-8"),
++      headers={
++          "Content-Type": "application/json",
++          "Authorization": f"Bearer {api_key}",
++      },
++      method="POST",
++  )
++  try:
++    with urllib.request.urlopen(request, timeout=90) as response:
++      result = json.loads(response.read().decode("utf-8"))
++    return clean_thai_ocr_text(
++        result["choices"][0]["message"]["content"] or ""
++    )
++  except urllib.error.HTTPError as exc:
++    raise RuntimeError(
++        "Typhoon OCR HTTP"
++        f" {exc.code}: {exc.read().decode('utf-8', errors='replace')[:300]}"
++    ) from exc
++  except (KeyError, IndexError, TypeError) as exc:
++    raise RuntimeError("Typhoon OCR เนเธกเนเธชเนเธเธเนเธญเธเธงเธฒเธกเธเธฅเธฑเธเธกเธฒ") from exc
+ 
+ 
+ def gemini_api_key() -> str:
+-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
++  return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+ 
+ 
+ @st.cache_data(ttl=300, show_spinner=False)
+ def list_gemini_models() -> list[dict[str, object]]:
+-    """Return model metadata available to this API key for generateContent."""
+-    api_key = gemini_api_key()
+-    if not api_key:
+-        raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY")
+-    models: list[dict[str, object]] = []
+-    page_token = ""
+-    try:
+-        while True:
+-            query = "?pageSize=1000"
+-            if page_token:
+-                query += f"&pageToken={urllib.parse.quote(page_token)}"
+-            request = urllib.request.Request(
+-                f"https://generativelanguage.googleapis.com/v1beta/models{query}",
+-                headers={"x-goog-api-key": api_key},
+-                method="GET",
+-            )
+-            with urllib.request.urlopen(request, timeout=30) as response:
+-                result = json.loads(response.read().decode("utf-8"))
+-            for model in result.get("models", []):
+-                if "generateContent" in model.get("supportedGenerationMethods", []):
+-                    name = model.get("name", "")
+-                    if name.startswith("models/"):
+-                        name = name[7:]
+-                    if name:
+-                        models.append({
+-                            "name": name,
+-                            "display_name": model.get("displayName") or name,
+-                            "description": model.get("description") or "เนเธกเนเธกเธตเธเธณเธญเธเธดเธเธฒเธขเธเธฒเธ API",
+-                            "input_token_limit": model.get("inputTokenLimit"),
+-                            "output_token_limit": model.get("outputTokenLimit"),
+-                            "supported_methods": model.get("supportedGenerationMethods", []),
+-                        })
+-            page_token = result.get("nextPageToken", "")
+-            if not page_token:
+-                break
+-    except urllib.error.HTTPError as exc:
+-        detail = exc.read().decode("utf-8", errors="replace")
+-        raise RuntimeError(f"Gemini ListModels HTTP {exc.code}: {detail[:300]}") from exc
+-    except urllib.error.URLError as exc:
+-        raise RuntimeError(f"เน€เธเธทเนเธญเธกเธ•เนเธญ Gemini ListModels เนเธกเนเธชเธณเน€เธฃเนเธ: {exc.reason}") from exc
+-    unique_models = {str(model["name"]): model for model in models}
+-    return [unique_models[name] for name in sorted(unique_models)]
++  """Return model metadata available to this API key for generateContent."""
++  api_key = gemini_api_key()
++  if not api_key:
++    raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY")
++  models: list[dict[str, object]] = []
++  page_token = ""
++  try:
++    while True:
++      query = "?pageSize=1000"
++      if page_token:
++        query += f"&pageToken={urllib.parse.quote(page_token)}"
++      request = urllib.request.Request(
++          f"https://generativelanguage.googleapis.com/v1beta/models{query}",
++          headers={"x-goog-api-key": api_key},
++          method="GET",
++      )
++      with urllib.request.urlopen(request, timeout=30) as response:
++        result = json.loads(response.read().decode("utf-8"))
++      for model in result.get("models", []):
++        if "generateContent" in model.get("supportedGenerationMethods", []):
++          name = model.get("name", "")
++          if name.startswith("models/"):
++            name = name[7:]
++          if name:
++            models.append({
++                "name": name,
++                "display_name": model.get("displayName") or name,
++                "description": model.get("description")
++                or "เนเธกเนเธกเธตเธเธณเธญเธเธดเธเธฒเธขเธเธฒเธ API",
++                "input_token_limit": model.get("inputTokenLimit"),
++                "output_token_limit": model.get("outputTokenLimit"),
++                "supported_methods": model.get("supportedGenerationMethods", []),
++            })
++      page_token = result.get("nextPageToken", "")
++      if not page_token:
++        break
++  except urllib.error.HTTPError as exc:
++    detail = exc.read().decode("utf-8", errors="replace")
++    raise RuntimeError(
++        f"Gemini ListModels HTTP {exc.code}: {detail[:300]}"
++    ) from exc
++  except urllib.error.URLError as exc:
++    raise RuntimeError(f"เน€เธเธทเนเธญเธกเธ•เนเธญ Gemini ListModels เนเธกเนเธชเธณเน€เธฃเนเธ: {exc.reason}") from exc
++  unique_models = {str(model["name"]): model for model in models}
++  return [unique_models[name] for name in sorted(unique_models)]
+ 
+ 
+ def gemini_model_kind(model_name: str) -> str:
+-    name = model_name.lower()
+-    if "pro" in name:
+-        return "Pro โ€” เน€เธเนเธเธเธธเธ“เธ เธฒเธเนเธฅเธฐเธเธฒเธฃเนเธซเนเน€เธซเธ•เธธเธเธฅ"
+-    if "flash-lite" in name or "lite" in name:
+-        return "Flash-Lite โ€” เน€เธฃเนเธงเนเธฅเธฐเธเธฃเธฐเธซเธขเธฑเธ”"
+-    if "flash" in name:
+-        return "Flash โ€” เธชเธกเธ”เธธเธฅเธเธงเธฒเธกเน€เธฃเนเธงเนเธฅเธฐเธเธธเธ“เธ เธฒเธ"
+-    return "เธฃเธธเนเธ Gemini เธญเธทเนเธ เน"
++  name = model_name.lower()
++  if "pro" in name:
++    return "Pro โ€” เน€เธเนเธเธเธธเธ“เธ เธฒเธเนเธฅเธฐเธเธฒเธฃเนเธซเนเน€เธซเธ•เธธเธเธฅ"
++  if "flash-lite" in name or "lite" in name:
++    return "Flash-Lite โ€” เน€เธฃเนเธงเนเธฅเธฐเธเธฃเธฐเธซเธขเธฑเธ”"
++  if "flash" in name:
++    return "Flash โ€” เธชเธกเธ”เธธเธฅเธเธงเธฒเธกเน€เธฃเนเธงเนเธฅเธฐเธเธธเธ“เธ เธฒเธ"
++  return "เธฃเธธเนเธ Gemini เธญเธทเนเธ เน"
+ 
+ 
+ def format_token_limit(value: object) -> str:
+-    if isinstance(value, (int, float)):
+-        return f"{int(value):,} tokens"
+-    return "เนเธกเนเธฃเธฐเธเธธ"
++  if isinstance(value, (int, float)):
++    return f"{int(value):,} tokens"
++  return "เนเธกเนเธฃเธฐเธเธธ"
+ 
+ 
+ def gemini_model_profile(model_name: str) -> dict[str, object]:
+-    """Provide an easy-to-read, approximate profile based on the model family."""
+-    name = model_name.lower()
+-    if "pro" in name:
+-        return {
+-            "quality": 5,
+-            "speed": 3,
+-            "vision": 5,
+-            "economy": 2,
+-            "best_for": "เนเธเนเน€เธญเธเธชเธฒเธฃเธเธฑเธเธเนเธญเธ เธ•เนเธญเธเธเธฒเธฃเธเธงเธฒเธกเธฅเธฐเน€เธญเธตเธขเธ”เนเธฅเธฐเธเธฒเธฃเนเธซเนเน€เธซเธ•เธธเธเธฅเธชเธนเธ",
+-        }
+-    if "flash-lite" in name or "lite" in name:
+-        return {
+-            "quality": 3,
+-            "speed": 5,
+-            "vision": 4,
+-            "economy": 5,
+-            "best_for": "เธเธฒเธเธเธณเธเธงเธเธกเธฒเธเธ—เธตเนเธ•เนเธญเธเธเธฒเธฃเธเธงเธฒเธกเน€เธฃเนเธงเนเธฅเธฐเธเธฃเธฐเธซเธขเธฑเธ”เธเนเธฒเนเธเนเธเนเธฒเธข",
+-        }
+-    if "flash" in name:
+-        return {
+-            "quality": 4,
+-            "speed": 4,
+-            "vision": 5,
+-            "economy": 4,
+-            "best_for": "เนเธเน OCR เธ เธฒเธฉเธฒเนเธ—เธขเธ—เธฑเนเธงเนเธ เธชเธกเธ”เธธเธฅเธฃเธฐเธซเธงเนเธฒเธเธเธธเธ“เธ เธฒเธ เธเธงเธฒเธกเน€เธฃเนเธง เนเธฅเธฐเธเนเธฒเนเธเนเธเนเธฒเธข",
+-        }
++  """Provide an easy-to-read, approximate profile based on the model family."""
++  name = model_name.lower()
++  if "pro" in name:
+     return {
+-        "quality": 3,
++        "quality": 5,
+         "speed": 3,
+-        "vision": 3,
+-        "economy": 3,
+-        "best_for": "เธเธงเธฃเธ—เธ”เธชเธญเธเธเธฑเธเน€เธญเธเธชเธฒเธฃเธเธฃเธดเธเธเนเธญเธเนเธเนเธเธฒเธเธเธณเธเธงเธเธกเธฒเธ",
++        "vision": 5,
++        "economy": 2,
++        "best_for": "เนเธเนเน€เธญเธเธชเธฒเธฃเธเธฑเธเธเนเธญเธ เธ•เนเธญเธเธเธฒเธฃเธเธงเธฒเธกเธฅเธฐเน€เธญเธตเธขเธ”เนเธฅเธฐเธเธฒเธฃเนเธซเนเน€เธซเธ•เธธเธเธฅเธชเธนเธ",
+     }
++  if "flash-lite" in name or "lite" in name:
++    return {
++        "quality": 3,
++        "speed": 5,
++        "vision": 4,
++        "economy": 5,
++        "best_for": "เธเธฒเธเธเธณเธเธงเธเธกเธฒเธเธ—เธตเนเธ•เนเธญเธเธเธฒเธฃเธเธงเธฒเธกเน€เธฃเนเธงเนเธฅเธฐเธเธฃเธฐเธซเธขเธฑเธ”เธเนเธฒเนเธเนเธเนเธฒเธข",
++    }
++  if "flash" in name:
++    return {
++        "quality": 4,
++        "speed": 4,
++        "vision": 5,
++        "economy": 4,
++        "best_for": (
++            "เนเธเน OCR เธ เธฒเธฉเธฒเนเธ—เธขเธ—เธฑเนเธงเนเธ เธชเธกเธ”เธธเธฅเธฃเธฐเธซเธงเนเธฒเธเธเธธเธ“เธ เธฒเธ เธเธงเธฒเธกเน€เธฃเนเธง เนเธฅเธฐเธเนเธฒเนเธเนเธเนเธฒเธข"
++        ),
++    }
++  return {
++      "quality": 3,
++      "speed": 3,
++      "vision": 3,
++      "economy": 3,
++      "best_for": "เธเธงเธฃเธ—เธ”เธชเธญเธเธเธฑเธเน€เธญเธเธชเธฒเธฃเธเธฃเธดเธเธเนเธญเธเนเธเนเธเธฒเธเธเธณเธเธงเธเธกเธฒเธ",
++  }
+ 
+ 
+ def star_scale(score: object) -> str:
+-    if not isinstance(score, int):
+-        return "เนเธกเนเธฃเธฐเธเธธ"
+-    score = max(0, min(5, score))
+-    return "โ…" * score + "โ" * (5 - score)
++  if not isinstance(score, int):
++    return "เนเธกเนเธฃเธฐเธเธธ"
++  score = max(0, min(5, score))
++  return "โ…" * score + "โ" * (5 - score)
+ 
+ 
+ def gemini_model_option_label(model_name: str) -> str:
+-    """Show only the model name in the dropdown options."""
+-    return model_name
++  """Show only the model name in the dropdown options."""
++  return model_name
+ 
+ 
+ def gemini_model_is_recommended(model_name: str) -> bool:
+-    """Keep the main picker focused on text/image models suitable for PDF correction."""
+-    name = model_name.lower()
+-    excluded_terms = (
+-        "tts", "image", "audio", "transcribe", "robotics", "computer-use",
+-        "lyria", "antigravity", "deep-research", "nano-banana",
+-    )
+-    return ("flash" in name or "pro" in name) and not any(term in name for term in excluded_terms)
++  """Keep the main picker focused on text/image models suitable for PDF correction."""
++  name = model_name.lower()
++  excluded_terms = (
++      "tts",
++      "image",
++      "audio",
++      "transcribe",
++      "robotics",
++      "computer-use",
++      "lyria",
++      "antigravity",
++      "deep-research",
++      "nano-banana",
++  )
++  return ("flash" in name or "pro" in name) and not any(
++      term in name for term in excluded_terms
++  )
+ 
+ 
+ def gemini_rating_html(label: str, score: object, description: str) -> str:
+-    """Render a rating row with a hover tooltip explaining the 1-5 scale."""
+-    return (
+-        '<div class="gemini-rating-row" title="'
+-        f'{description}'
+-        '">'
+-        f'<span class="gemini-rating-label">{label}</span>'
+-        f'<span class="gemini-rating-stars">{star_scale(score)}</span>'
+-        '<span class="gemini-rating-help">โ“</span>'
+-        '</div>'
+-    )
++  """Render a rating row with a hover tooltip explaining the 1-5 scale."""
++  return (
++      '<div class="gemini-rating-row" title="'
++      f"{description}"
++      '">'
++      f'<span class="gemini-rating-label">{label}</span>'
++      f'<span class="gemini-rating-stars">{star_scale(score)}</span>'
++      '<span class="gemini-rating-help">โ“</span>'
++      "</div>"
++  )
+ 
+ 
+ def gemini_correct_text(image_bytes: bytes, source_text: str, model: str) -> str:
+-    """Correct Thai PDF text using the page image as the source of truth."""
+-    api_key = gemini_api_key()
+-    if not api_key:
+-        raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY")
+-    prompt = (
+-        "เธเธธเธ“เน€เธเนเธเธฃเธฐเธเธเธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธก OCR เธ เธฒเธฉเธฒเนเธ—เธขเธเธฒเธเน€เธญเธเธชเธฒเธฃเธฃเธฒเธเธเธฒเธฃ\n"
+-        "เธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธเธ เธฒเธเธ•เนเธเธเธเธฑเธเน€เธเนเธเธซเธฅเธฑเธ เนเธฅเธฐเนเธเนเธเนเธญเธเธงเธฒเธก OCR เธ”เนเธฒเธเธฅเนเธฒเธเน€เธเนเธเน€เธเธตเธขเธเธ•เธฑเธงเธเนเธงเธข\n"
+-        "เนเธเนเน€เธเธเธฒเธฐเธชเธฃเธฐ เธงเธฃเธฃเธ“เธขเธธเธเธ•เน เธเธฒเธฃเนเธขเธเธเธณ เธเนเธญเธเธงเนเธฒเธ เนเธฅเธฐเธญเธฑเธเธเธฃเธฐเธ—เธตเนเธญเนเธฒเธเธเธดเธ”เธเธฒเธ PDF font mapping\n"
+-        "เธซเนเธฒเธกเธชเธฃเธธเธ เธซเนเธฒเธกเธ•เธฑเธ”เธเนเธญเธเธงเธฒเธก เธซเนเธฒเธกเน€เธเธดเนเธกเธเนเธญเธเธงเธฒเธก เนเธฅเธฐเธซเนเธฒเธกเน€เธเธฅเธตเนเธขเธเน€เธฅเธเนเธ—เธข เธงเธฑเธเธ—เธตเน เน€เธฅเธเธ—เธตเนเธซเธเธฑเธเธชเธทเธญ เธซเธฃเธทเธญเธชเธฒเธฃเธฐเธชเธณเธเธฑเธ\n"
+-        "เธฃเธฑเธเธฉเธฒเธเธฒเธฃเธเธถเนเธเธเธฃเธฃเธ—เธฑเธ”เนเธซเธกเนเนเธซเนเนเธเธฅเนเน€เธเธตเธขเธเธ•เนเธเธเธเธฑเธ เธซเธฒเธเนเธกเนเนเธเนเนเธเนเธซเนเธเธเธเนเธญเธเธงเธฒเธกเน€เธ”เธดเธกเนเธงเน\n"
+-        "เธชเนเธเธเธทเธเน€เธเธเธฒเธฐเธเนเธญเธเธงเธฒเธกเธ—เธตเนเนเธเนเนเธฅเนเธง เธซเนเธฒเธกเนเธชเน Markdown เธซเนเธฒเธกเนเธชเนเธเธณเธญเธเธดเธเธฒเธข\n\n"
+-        "เธเนเธญเธเธงเธฒเธก OCR เน€เธ”เธดเธก:\n"
+-        f"{source_text}"
++  """Correct Thai PDF text using the page image as the source of truth."""
++  api_key = gemini_api_key()
++  if not api_key:
++    raise RuntimeError("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY")
++  prompt = (
++      "เธเธธเธ“เน€เธเนเธเธฃเธฐเธเธเธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธก OCR เธ เธฒเธฉเธฒเนเธ—เธขเธเธฒเธเน€เธญเธเธชเธฒเธฃเธฃเธฒเธเธเธฒเธฃ\n"
++      "เธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธเธ เธฒเธเธ•เนเธเธเธเธฑเธเน€เธเนเธเธซเธฅเธฑเธ เนเธฅเธฐเนเธเนเธเนเธญเธเธงเธฒเธก OCR เธ”เนเธฒเธเธฅเนเธฒเธเน€เธเนเธเน€เธเธตเธขเธเธ•เธฑเธงเธเนเธงเธข\n"
++      "เนเธเนเน€เธเธเธฒเธฐเธชเธฃเธฐ เธงเธฃเธฃเธ“เธขเธธเธเธ•เน เธเธฒเธฃเนเธขเธเธเธณ เธเนเธญเธเธงเนเธฒเธ เนเธฅเธฐเธญเธฑเธเธเธฃเธฐเธ—เธตเนเธญเนเธฒเธเธเธดเธ”เธเธฒเธ PDF font"
++      " mapping\n"
++      "เธซเนเธฒเธกเธชเธฃเธธเธ เธซเนเธฒเธกเธ•เธฑเธ”เธเนเธญเธเธงเธฒเธก เธซเนเธฒเธกเน€เธเธดเนเธกเธเนเธญเธเธงเธฒเธก เนเธฅเธฐเธซเนเธฒเธกเน€เธเธฅเธตเนเธขเธเน€เธฅเธเนเธ—เธข เธงเธฑเธเธ—เธตเน"
++      " เน€เธฅเธเธ—เธตเนเธซเธเธฑเธเธชเธทเธญ เธซเธฃเธทเธญเธชเธฒเธฃเธฐเธชเธณเธเธฑเธ\n"
++      "เธฃเธฑเธเธฉเธฒเธเธฒเธฃเธเธถเนเธเธเธฃเธฃเธ—เธฑเธ”เนเธซเธกเนเนเธซเนเนเธเธฅเนเน€เธเธตเธขเธเธ•เนเธเธเธเธฑเธ เธซเธฒเธเนเธกเนเนเธเนเนเธเนเธซเนเธเธเธเนเธญเธเธงเธฒเธกเน€เธ”เธดเธกเนเธงเน\n"
++      "เธชเนเธเธเธทเธเน€เธเธเธฒเธฐเธเนเธญเธเธงเธฒเธกเธ—เธตเนเนเธเนเนเธฅเนเธง เธซเนเธฒเธกเนเธชเน Markdown เธซเนเธฒเธกเนเธชเนเธเธณเธญเธเธดเธเธฒเธข\n\n"
++      "เธเนเธญเธเธงเธฒเธก OCR เน€เธ”เธดเธก:\n"
++      f"{source_text}"
++  )
++  payload = {
++      "contents": [{
++          "parts": [
++              {"text": prompt},
++              {
++                  "inline_data": {
++                      "mime_type": "image/png",
++                      "data": base64.b64encode(image_bytes).decode("ascii"),
++                  }
++              },
++          ]
++      }],
++      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
++  }
++  endpoint = (
++      "https://generativelanguage.googleapis.com/v1beta/models/"
++      f"{model}:generateContent"
++  )
++  request = urllib.request.Request(
++      endpoint,
++      data=json.dumps(payload).encode("utf-8"),
++      headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
++      method="POST",
++  )
++  try:
++    with urllib.request.urlopen(request, timeout=120) as response:
++      result = json.loads(response.read().decode("utf-8"))
++    corrected = "\n".join(
++        part["text"]
++        for part in result["candidates"][0]["content"]["parts"]
++        if part.get("text")
++    ).strip()
++  except urllib.error.HTTPError as exc:
++    detail = exc.read().decode("utf-8", errors="replace")
++    if exc.code == 404:
++      raise RuntimeError(
++          f"Gemini HTTP 404: เนเธกเนเธเธเธซเธฃเธทเธญเนเธกเนเน€เธเธดเธ”เนเธเนเนเธกเน€เธ”เธฅ '{model}'"
++          " เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธเนเธกเน€เธ”เธฅเธเธฒเธเธฃเธฒเธขเธเธฒเธฃเธ—เธตเนเธ•เธฃเธงเธเธเธเนเธ Sidebar"
++      ) from exc
++    raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:300]}") from exc
++  except urllib.error.URLError as exc:
++    raise RuntimeError(f"เน€เธเธทเนเธญเธกเธ•เนเธญ Gemini เนเธกเนเธชเธณเน€เธฃเนเธ: {exc.reason}") from exc
++  except (KeyError, IndexError, TypeError) as exc:
++    raise RuntimeError("Gemini เนเธกเนเธชเนเธเธเนเธญเธเธงเธฒเธกเธเธฅเธฑเธเธกเธฒ") from exc
++
++  if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
++    raise RuntimeError(
++        "Gemini เธชเนเธเธเนเธญเธเธงเธฒเธกเนเธเนเนเธเธเธฅเธฑเธเธกเธฒเธชเธฑเนเธเธเธดเธ”เธเธเธ•เธด เธเธถเธเธเธเธเนเธญเธเธงเธฒเธกเน€เธ”เธดเธกเนเธงเน"
+     )
+-    payload = {
+-        "contents": [{"parts": [
+-            {"text": prompt},
+-            {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}},
+-        ]}],
+-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 8192},
+-    }
+-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+-    request = urllib.request.Request(
+-        endpoint,
+-        data=json.dumps(payload).encode("utf-8"),
+-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+-        method="POST",
+-    )
+-    try:
+-        with urllib.request.urlopen(request, timeout=120) as response:
+-            result = json.loads(response.read().decode("utf-8"))
+-        corrected = "\n".join(
+-            part["text"]
+-            for part in result["candidates"][0]["content"]["parts"]
+-            if part.get("text")
+-        ).strip()
+-    except urllib.error.HTTPError as exc:
+-        detail = exc.read().decode("utf-8", errors="replace")
+-        if exc.code == 404:
+-            raise RuntimeError(
+-                f"Gemini HTTP 404: เนเธกเนเธเธเธซเธฃเธทเธญเนเธกเนเน€เธเธดเธ”เนเธเนเนเธกเน€เธ”เธฅ '{model}' "
+-                "เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธเนเธกเน€เธ”เธฅเธเธฒเธเธฃเธฒเธขเธเธฒเธฃเธ—เธตเนเธ•เธฃเธงเธเธเธเนเธ Sidebar"
+-            ) from exc
+-        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail[:300]}") from exc
+-    except urllib.error.URLError as exc:
+-        raise RuntimeError(f"เน€เธเธทเนเธญเธกเธ•เนเธญ Gemini เนเธกเนเธชเธณเน€เธฃเนเธ: {exc.reason}") from exc
+-    except (KeyError, IndexError, TypeError) as exc:
+-        raise RuntimeError("Gemini เนเธกเนเธชเนเธเธเนเธญเธเธงเธฒเธกเธเธฅเธฑเธเธกเธฒ") from exc
+-
+-    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
+-        raise RuntimeError("Gemini เธชเนเธเธเนเธญเธเธงเธฒเธกเนเธเนเนเธเธเธฅเธฑเธเธกเธฒเธชเธฑเนเธเธเธดเธ”เธเธเธ•เธด เธเธถเธเธเธเธเนเธญเธเธงเธฒเธกเน€เธ”เธดเธกเนเธงเน")
+-    return clean_thai_ocr_text(corrected)
++  return clean_thai_ocr_text(corrected)
+ 
+ 
+ def gemini_correct_document(pdf_bytes: bytes, source_text: str, model: str) -> str:
+-    """Correct a PDF using Gemini's native document understanding.
+-
+-    Sending the original PDF lets Gemini use its embedded text and page
+-    layout instead of requiring one rendered PNG request per page. The local
+-    OCR text is retained as a reference for characters that are difficult to
+-    read from the document alone.
+-    """
+-    api_key = gemini_api_key()
+-    if not api_key:
+-        raise RuntimeError("GEMINI_API_KEY is not configured")
+-
+-    prompt = (
+-        "You are correcting Thai OCR from an official document. Read the PDF "
+-        "itself as the primary source, including its native text, layout, and "
+-        "visual content. Use the supplied OCR only as a secondary reference. "
+-        "Correct spelling, Thai vowels, tone marks, spacing, and PDF font "
+-        "mapping errors without summarizing or adding text. Preserve every "
+-        "page marker and return the corrected text in the same page order. "
+-        "Return only the corrected document text.\n\n"
+-        "LOCAL OCR REFERENCE:\n"
+-        f"{source_text}"
+-    )
+-    payload = {
+-        "contents": [{"parts": [
+-            {"text": prompt},
+-            {"inline_data": {
+-                "mime_type": "application/pdf",
+-                "data": base64.b64encode(pdf_bytes).decode("ascii"),
+-            }},
+-        ]}],
+-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 32768},
+-    }
+-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+-    request = urllib.request.Request(
+-        endpoint,
+-        data=json.dumps(payload).encode("utf-8"),
+-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+-        method="POST",
++  """Correct a PDF using Gemini's native document understanding."""
++  api_key = gemini_api_key()
++  if not api_key:
++    raise RuntimeError("GEMINI_API_KEY is not configured")
++
++  prompt = (
++      "You are correcting Thai OCR from an official document. Read the PDF"
++      " itself as the primary source, including its native text, layout, and"
++      " visual content. Use the supplied OCR only as a secondary reference."
++      " Correct spelling, Thai vowels, tone marks, spacing, and PDF font"
++      " mapping errors without summarizing or adding text. Preserve every"
++      " page marker and return the corrected text in the same page order."
++      " Return only the corrected document text.\n\n"
++      "LOCAL OCR REFERENCE:\n"
++      f"{source_text}"
++  )
++  payload = {
++      "contents": [{
++          "parts": [
++              {"text": prompt},
++              {
++                  "inline_data": {
++                      "mime_type": "application/pdf",
++                      "data": base64.b64encode(pdf_bytes).decode("ascii"),
++                  }
++              },
++          ]
++      }],
++      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 32768},
++  }
++  endpoint = (
++      "https://generativelanguage.googleapis.com/v1beta/models/"
++      f"{model}:generateContent"
++  )
++  request = urllib.request.Request(
++      endpoint,
++      data=json.dumps(payload).encode("utf-8"),
++      headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
++      method="POST",
++  )
++  try:
++    with urllib.request.urlopen(request, timeout=180) as response:
++      result = json.loads(response.read().decode("utf-8"))
++    corrected = "\n".join(
++        part["text"]
++        for part in result["candidates"][0]["content"]["parts"]
++        if part.get("text")
++    ).strip()
++  except urllib.error.HTTPError as exc:
++    detail = exc.read().decode("utf-8", errors="replace")
++    raise RuntimeError(f"Gemini document HTTP {exc.code}: {detail[:300]}") from exc
++  except urllib.error.URLError as exc:
++    raise RuntimeError(f"Gemini document connection failed: {exc.reason}") from exc
++  except (KeyError, IndexError, TypeError) as exc:
++    raise RuntimeError("Gemini returned no document text") from exc
++
++  if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
++    raise RuntimeError(
++        "Gemini document correction returned unexpectedly short text"
+     )
+-    try:
+-        with urllib.request.urlopen(request, timeout=180) as response:
+-            result = json.loads(response.read().decode("utf-8"))
+-        corrected = "\n".join(
+-            part["text"]
+-            for part in result["candidates"][0]["content"]["parts"]
+-            if part.get("text")
+-        ).strip()
+-    except urllib.error.HTTPError as exc:
+-        detail = exc.read().decode("utf-8", errors="replace")
+-        raise RuntimeError(f"Gemini document HTTP {exc.code}: {detail[:300]}") from exc
+-    except urllib.error.URLError as exc:
+-        raise RuntimeError(f"Gemini document connection failed: {exc.reason}") from exc
+-    except (KeyError, IndexError, TypeError) as exc:
+-        raise RuntimeError("Gemini returned no document text") from exc
+-
+-    if not corrected or len(corrected) < max(10, round(len(source_text) * 0.25)):
+-        raise RuntimeError("Gemini document correction returned unexpectedly short text")
+-    validate_document_markers(source_text, corrected)
+-    return clean_thai_ocr_text(corrected)
+-
+-
+-PAGE_MARKER_RE = re.compile(r"^----- เธซเธเนเธฒ ([0-9]+)(?: \| .*?)? -----$", re.MULTILINE)
++  validate_document_markers(source_text, corrected)
++  return clean_thai_ocr_text(corrected)
+ 
+ 
+-def document_page_markers(text: str) -> list[int]:
+-    """Extract ordered page markers from a document OCR result."""
+-    return [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(text or "")]
++PAGE_MARKER_RE = re.compile(
++    r"^----- เธซเธเนเธฒ ([0-9]+)(?: \| .*?)? -----$", re.MULTILINE
++)
+ 
+ 
+-def validate_document_markers(source_text: str, corrected_text: str) -> None:
+-    """Reject Gemini output that loses, duplicates, or reorders page markers."""
+-    expected = document_page_markers(source_text)
+-    actual = document_page_markers(corrected_text)
+-    if not expected:
+-        raise RuntimeError("Local OCR output has no page markers to validate")
+-    if actual != expected:
+-        missing = [page for page in expected if page not in actual]
+-        unexpected = [page for page in actual if page not in expected]
+-        details = []
+-        if missing:
+-            details.append(f"เธซเธเนเธฒเธ—เธตเนเธซเธฒเธข: {', '.join(map(str, missing[:10]))}")
+-        if unexpected:
+-            details.append(f"เธซเธเนเธฒเธ—เธตเนเน€เธเธดเธ/เธเนเธณ: {', '.join(map(str, unexpected[:10]))}")
+-        if not details:
+-            details.append("เธฅเธณเธ”เธฑเธ marker เนเธกเนเธ•เธฃเธเธเธฑเธเน€เธญเธเธชเธฒเธฃเธ•เนเธเธเธเธฑเธ")
+-        raise RuntimeError("Gemini เธชเนเธ marker เธซเธเนเธฒเนเธกเนเธเธฃเธเธซเธฃเธทเธญเน€เธฃเธตเธขเธเธฅเธณเธ”เธฑเธเธเธดเธ”: " + "; ".join(details))
++def document_page_markers(text: str) -> list[int]:
++  """Extract ordered page markers from a document OCR result."""
++  return [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(text or "")]
+ 
+ 
++def validate_document_markers(source_text: str, corrected_text: str) -> None:
++  """Reject Gemini output that loses, duplicates, or reorders page markers."""
++  expected = document_page_markers(source_text)
++  actual = document_page_markers(corrected_text)
++  if not expected:
++    raise RuntimeError("Local OCR output has no page markers to validate")
++  if actual != expected:
++    missing = [page for page in expected if page not in actual]
++    unexpected = [page for page in actual if page not in expected]
++    details = []
++    if missing:
++      details.append(f"เธซเธเนเธฒเธ—เธตเนเธซเธฒเธข: {', '.join(map(str, missing[:10]))}")
++    if unexpected:
++      details.append(f"เธซเธเนเธฒเธ—เธตเนเน€เธเธดเธ/เธเนเธณ: {', '.join(map(str, unexpected[:10]))}")
++    if not details:
++      details.append("เธฅเธณเธ”เธฑเธ marker เนเธกเนเธ•เธฃเธเธเธฑเธเน€เธญเธเธชเธฒเธฃเธ•เนเธเธเธเธฑเธ")
++    raise RuntimeError(
++        "Gemini เธชเนเธ marker เธซเธเนเธฒเนเธกเนเธเธฃเธเธซเธฃเธทเธญเน€เธฃเธตเธขเธเธฅเธณเธ”เธฑเธเธเธดเธ”: " + "; ".join(details)
++    )
+ 
+ 
+ def tesseract_path() -> str | None:
+-    configured = os.getenv("TESSERACT_CMD")
+-    if configured:
+-        return configured
+-    found = shutil.which("tesseract")
+-    if found:
+-        return found
+-    for candidate in (
+-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+-    ):
+-        if Path(candidate).exists():
+-            return candidate
+-    return None
++  configured = os.getenv("TESSERACT_CMD")
++  if configured:
++    return configured
++  found = shutil.which("tesseract")
++  if found:
++    return found
++  for candidate in (
++      r"C:\Program Files\Tesseract-OCR\tesseract.exe",
++      r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
++  ):
++    if Path(candidate).exists():
++      return candidate
++  return None
+ 
+ 
+ def _extract_page_text_once(
+@@ -519,80 +579,89 @@ def _extract_page_text_once(
+     psm: str,
+     oem: str = OEM_LSTM_ONLY,
+ ) -> str:
+-    command = tesseract_path()
+-    if not command:
+-        raise RuntimeError(
+-            "เนเธกเนเธเธ Tesseract เนเธเธฃเธฐเธเธ เธเธฃเธธเธ“เธฒเธ•เธดเธ”เธ•เธฑเนเธ tesseract-ocr เนเธฅเธฐ tesseract-ocr-tha"
+-        )
+-    prepared = preprocess_image(image_bytes, mode)
+-    # Call the Tesseract executable directly. This avoids pytesseract's
+-    # temporary-file decoding path, which can raise UnicodeDecodeError on
+-    # Windows when Thai output contains mixed encodings.
+-    with tempfile.TemporaryDirectory(prefix="th_ocr_") as temp_dir:
+-        image_path = Path(temp_dir) / "page.png"
+-        image_path.write_bytes(prepared)
+-        args = [
+-            command,
+-            str(image_path),
+-            "stdout",
+-            "-l",
+-            language,
+-            "--psm",
+-            str(psm),
+-            "--oem",
+-            str(oem),
+-            "--dpi",
+-            "300",
+-            "-c",
+-            "user_defined_dpi=300",
+-        ]
+-        if "tha" not in language:
+-            args.extend(["-c", "preserve_interword_spaces=1"])
+-        if (TESSDATA_DIR / "tha.traineddata").exists() and (TESSDATA_DIR / "eng.traineddata").exists():
+-            args.extend(["--tessdata-dir", str(TESSDATA_DIR)])
+-        result = subprocess.run(
+-            args,
+-            stdout=subprocess.PIPE,
+-            stderr=subprocess.PIPE,
+-            timeout=120,
+-            check=False,
+-        )
+-    if result.returncode != 0:
+-        error = result.stderr.decode("utf-8", errors="replace").strip()
+-        raise RuntimeError(f"Tesseract เธ—เธณเธเธฒเธเนเธกเนเธชเธณเน€เธฃเนเธ (เธฃเธซเธฑเธช {result.returncode}): {error}")
+-
+-    raw = result.stdout
+-    # Decode defensively so one page cannot fail only because of a Windows
+-    # code-page mismatch.
+-    candidates = []
+-    for encoding in ("utf-8", "cp874", "tis-620"):
+-        decoded = raw.decode(encoding, errors="replace")
+-        replacement_count = decoded.count("\ufffd")
+-        control_count = sum(1 for char in decoded if ord(char) < 32 and char not in "\n\r\t")
+-        candidates.append((replacement_count, control_count, decoded))
+-    return clean_thai_ocr_text(min(candidates, key=lambda item: (item[0], item[1]))[2])
+-
++  command = tesseract_path()
++  if not command:
++    raise RuntimeError(
++        "เนเธกเนเธเธ Tesseract เนเธเธฃเธฐเธเธ เธเธฃเธธเธ“เธฒเธ•เธดเธ”เธ•เธฑเนเธ tesseract-ocr เนเธฅเธฐ tesseract-ocr-tha"
++    )
++  prepared = preprocess_image(image_bytes, mode)
++  with tempfile.TemporaryDirectory(prefix="th_ocr_") as temp_dir:
++    image_path = Path(temp_dir) / "page.png"
++    image_path.write_bytes(prepared)
++    args = [
++        command,
++        str(image_path),
++        "stdout",
++        "-l",
++        language,
++        "--psm",
++        str(psm),
++        "--oem",
++        str(oem),
++        "--dpi",
++        "300",
++        "-c",
++        "user_defined_dpi=300",
++    ]
++    if "tha" not in language:
++      args.extend(["-c", "preserve_interword_spaces=1"])
++    if (TESSDATA_DIR / "tha.traineddata").exists() and (
++        TESSDATA_DIR / "eng.traineddata"
++    ).exists():
++      args.extend(["--tessdata-dir", str(TESSDATA_DIR)])
++    result = subprocess.run(
++        args,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        timeout=120,
++        check=False,
++    )
++  if result.returncode != 0:
++    error = result.stderr.decode("utf-8", errors="replace").strip()
++    raise RuntimeError(
++        f"Tesseract เธ—เธณเธเธฒเธเนเธกเนเธชเธณเน€เธฃเนเธ (เธฃเธซเธฑเธช {result.returncode}): {error}"
++    )
+ 
+-class TesseractWorker:
+-    """Reusable OCR worker with a Tesseract.js-like lifecycle."""
++  raw = result.stdout
++  candidates = []
++  for encoding in ("utf-8", "cp874", "tis-620"):
++    decoded = raw.decode(encoding, errors="replace")
++    replacement_count = decoded.count("\ufffd")
++    control_count = sum(
++        1 for char in decoded if ord(char) < 32 and char not in "\n\r\t"
++    )
++    candidates.append((replacement_count, control_count, decoded))
++  return clean_thai_ocr_text(
++      min(candidates, key=lambda item: (item[0], item[1]))[2]
++  )
+ 
+-    def __init__(self, language: str, mode: str, psm: str, oem: str = OEM_LSTM_ONLY) -> None:
+-        self.command = tesseract_path()
+-        if not self.command:
+-            raise RuntimeError("เนเธกเนเธเธ Tesseract เนเธเธฃเธฐเธเธ เธเธฃเธธเธ“เธฒเธ•เธดเธ”เธ•เธฑเนเธ tesseract-ocr เนเธฅเธฐ tesseract-ocr-tha")
+-        self.language = language
+-        self.mode = mode
+-        self.psm = psm
+-        self.oem = oem
+-        self.closed = False
+ 
+-    def recognize(self, image_bytes: bytes) -> str:
+-        if self.closed:
+-            raise RuntimeError("OCR worker เธ–เธนเธเธเธดเธ”เนเธเนเธฅเนเธง")
+-        return _extract_page_text_once(image_bytes, self.language, self.mode, self.psm, self.oem)
++class TesseractWorker:
++  """Reusable OCR worker with a Tesseract.js-like lifecycle."""
++
++  def __init__(
++      self, language: str, mode: str, psm: str, oem: str = OEM_LSTM_ONLY
++  ) -> None:
++    self.command = tesseract_path()
++    if not self.command:
++      raise RuntimeError(
++          "เนเธกเนเธเธ Tesseract เนเธเธฃเธฐเธเธ เธเธฃเธธเธ“เธฒเธ•เธดเธ”เธ•เธฑเนเธ tesseract-ocr เนเธฅเธฐ tesseract-ocr-tha"
++      )
++    self.language = language
++    self.mode = mode
++    self.psm = psm
++    self.oem = oem
++    self.closed = False
++
++  def recognize(self, image_bytes: bytes) -> str:
++    if self.closed:
++      raise RuntimeError("OCR worker เธ–เธนเธเธเธดเธ”เนเธเนเธฅเนเธง")
++    return _extract_page_text_once(
++        image_bytes, self.language, self.mode, self.psm, self.oem
++    )
+ 
+-    def terminate(self) -> None:
+-        self.closed = True
++  def terminate(self) -> None:
++    self.closed = True
+ 
+ 
+ def extract_pdf(
+@@ -607,133 +676,162 @@ def extract_pdf(
+     progress: object,
+     page_callback: object | None = None,
+ ) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
+-    try:
+-        import pymupdf as fitz
+-    except ImportError:
+-        import fitz
+-
+-    engine = usable_ocr_engine(engine)
+-    if len(pdf_bytes) > MAX_FILE_BYTES:
+-        raise ValueError("เนเธเธฅเนเนเธซเธเนเน€เธเธดเธ 50 MB")
++  try:
++    import pymupdf as fitz
++  except ImportError:
++    import fitz
++
++  engine = usable_ocr_engine(engine)
++  if len(pdf_bytes) > MAX_FILE_BYTES:
++    raise ValueError("เนเธเธฅเนเนเธซเธเนเน€เธเธดเธ 50 MB")
++
++  document = fitz.open(stream=pdf_bytes, filetype="pdf")
++  try:
++    page_count = document.page_count
++    if page_count == 0:
++      raise ValueError("เนเธกเนเธเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃเนเธ PDF")
++    if page_count > MAX_PAGES:
++      raise ValueError(f"เน€เธญเธเธชเธฒเธฃเธกเธต {page_count} เธซเธเนเธฒ เน€เธเธดเธเธเธตเธ”เธเธณเธเธฑเธ” {MAX_PAGES} เธซเธเนเธฒ")
++
++    output: list[str] = []
++    errors: list[tuple[int | None, str]] = []
++    failed_images: dict[int, bytes] = {}
++    worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
++    gemini_document_mode = use_gemini_correction and len(pdf_bytes) <= MAX_FILE_BYTES
++
++    def publish_page() -> None:
++      if page_callback is not None:
++        page_callback("\n\n".join(output))
+ 
+-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+     try:
+-        page_count = document.page_count
+-        if page_count == 0:
+-            raise ValueError("เนเธกเนเธเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃเนเธ PDF")
+-        if page_count > MAX_PAGES:
+-            raise ValueError(f"เน€เธญเธเธชเธฒเธฃเธกเธต {page_count} เธซเธเนเธฒ เน€เธเธดเธเธเธตเธ”เธเธณเธเธฑเธ” {MAX_PAGES} เธซเธเนเธฒ")
+-
+-        output: list[str] = []
+-        errors: list[tuple[int | None, str]] = []
+-        failed_images: dict[int, bytes] = {}
+-        worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
+-        gemini_document_mode = use_gemini_correction and len(pdf_bytes) <= MAX_FILE_BYTES
+-
+-        def publish_page() -> None:
+-            if page_callback is not None:
+-                page_callback("\n\n".join(output))
+-
+-        try:
+-            # Process small batches so Gemini calls overlap while completed
+-            # pages are still published incrementally in document order.
+-            batch_size = GEMINI_MAX_WORKERS if use_gemini_correction and not gemini_document_mode else 1
+-            for batch_start in range(1, page_count + 1, batch_size):
+-                batch_end = min(page_count, batch_start + batch_size - 1)
+-                page_data: dict[int, tuple[str, str, bytes | None]] = {}
+-                gemini_jobs: dict[int, tuple[bytes, str]] = {}
+-                for page_number in range(batch_start, batch_end + 1):
+-                    ratio = (page_number - 1) / page_count
+-                    progress.progress(ratio * 0.5, text=f"เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเธซเธเนเธฒ {page_number}/{page_count}")
+-                    page = document[page_number - 1]
+-                    embedded = embedded_pdf_text(page)
+-                    # Born-digital PDFs already contain selectable text. Prefer it
+-                    # over image OCR to avoid corrupting Thai text and wasting API calls.
+-                    if len(embedded) >= 80:
+-                        text = embedded
+-                        image_bytes = render_page(document, page_number, mode) if use_gemini_correction and not gemini_document_mode else None
+-                        page_data[page_number] = (text, "embedded PDF text", image_bytes)
+-                        if image_bytes is not None and not gemini_document_mode:
+-                            gemini_jobs[page_number] = (image_bytes, text)
+-                        continue
+-                    image_bytes = render_page(document, page_number, mode)
+-                    try:
+-                        text = typhoon_transcribe(image_bytes) if engine == "typhoon" else worker.recognize(image_bytes)
+-                        text = text or embedded_pdf_text(document[page_number - 1]) or "[เนเธกเนเธเธเธเนเธญเธเธงเธฒเธก]"
+-                        page_data[page_number] = (text, engine, image_bytes)
+-                        if use_gemini_correction and not gemini_document_mode and text and not text.startswith("["):
+-                            gemini_jobs[page_number] = (image_bytes, text)
+-                    except Exception as exc:
+-                        fallback = embedded_pdf_text(document[page_number - 1])
+-                        if fallback:
+-                            page_data[page_number] = (fallback, "embedded PDF text", image_bytes)
+-                        else:
+-                            errors.append((page_number, f"{type(exc).__name__}: {exc}"))
+-                            failed_images[page_number] = image_bytes
+-
+-                futures = {}
+-                if gemini_jobs:
+-                    with ThreadPoolExecutor(max_workers=min(GEMINI_MAX_WORKERS, len(gemini_jobs))) as executor:
+-                        for page_number, (image_bytes, source_text) in gemini_jobs.items():
+-                            futures[page_number] = executor.submit(
+-                                gemini_correct_text, image_bytes, source_text, gemini_model
+-                            )
+-                        for page_number in range(batch_start, batch_end + 1):
+-                            if page_number not in page_data:
+-                                output.append(f"----- เธซเธเนเธฒ {page_number} -----\n[เธญเนเธฒเธเธซเธเนเธฒเธเธตเนเนเธกเนเธชเธณเน€เธฃเนเธ]")
+-                            else:
+-                                text, method, _ = page_data[page_number]
+-                                if page_number in futures:
+-                                    try:
+-                                        text = futures[page_number].result()
+-                                        method = "Gemini corrected"
+-                                    except Exception as correction_error:
+-                                        errors.append((page_number, f"Gemini เธ•เธฃเธงเธเนเธเนเนเธกเนเธชเธณเน€เธฃเนเธ: {correction_error}"))
+-                                output.append(f"----- เธซเธเนเธฒ {page_number} | {method} -----\n{text}")
+-                            progress.progress(
+-                                0.5 + (page_number / page_count) * 0.5,
+-                                text=f"เธญเนเธฒเธเธซเธเนเธฒ {page_number}/{page_count} เน€เธชเธฃเนเธเนเธฅเนเธง",
+-                            )
+-                            publish_page()
+-                else:
+-                    for page_number in range(batch_start, batch_end + 1):
+-                        if page_number not in page_data:
+-                            output.append(f"----- เธซเธเนเธฒ {page_number} -----\n[เธญเนเธฒเธเธซเธเนเธฒเธเธตเนเนเธกเนเธชเธณเน€เธฃเนเธ]")
+-                        else:
+-                            text, method, _ = page_data[page_number]
+-                            output.append(f"----- เธซเธเนเธฒ {page_number} | {method} -----\n{text}")
+-                        progress.progress(
+-                            0.5 + (page_number / page_count) * 0.5,
+-                            text=f"เธญเนเธฒเธเธซเธเนเธฒ {page_number}/{page_count} เน€เธชเธฃเนเธเนเธฅเนเธง",
+-                        )
+-                        publish_page()
+-        finally:
+-            if worker is not None:
+-                worker.terminate()
+-
+-        local_output = "\n\n".join(output)
+-        if gemini_document_mode and local_output:
+-            progress.progress(0.85, text="เธเธณเธฅเธฑเธเธชเนเธ PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธซเน Gemini เธ•เธฃเธงเธเนเธเน")
+-            try:
+-                corrected_document = gemini_correct_document(pdf_bytes, local_output, gemini_model)
+-                progress.progress(0.98, text="เธ•เธฃเธงเธเธชเธญเธเธฅเธณเธ”เธฑเธเนเธฅเธฐ marker เธซเธเนเธฒเนเธฅเนเธง")
+-                return corrected_document, errors, failed_images
+-            except Exception as correction_error:
+-                errors.append((None, f"Gemini เธ•เธฃเธงเธเนเธเนเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ: {correction_error}"))
+-        return local_output, errors, failed_images
++      batch_size = (
++          GEMINI_MAX_WORKERS
++          if use_gemini_correction and not gemini_document_mode
++          else 1
++      )
++      for batch_start in range(1, page_count + 1, batch_size):
++        batch_end = min(page_count, batch_start + batch_size - 1)
++        page_data: dict[int, tuple[str, str, bytes | None]] = {}
++        gemini_jobs: dict[int, tuple[bytes, str]] = {}
++        for page_number in range(batch_start, batch_end + 1):
++          ratio = (page_number - 1) / page_count
++          progress.progress(
++              ratio * 0.5, text=f"เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเธซเธเนเธฒ {page_number}/{page_count}"
++          )
++          page = document[page_number - 1]
++          embedded = embedded_pdf_text(page)
++          if len(embedded) >= 80:
++            text = embedded
++            image_bytes = (
++                render_page(document, page_number, mode)
++                if use_gemini_correction and not gemini_document_mode
++                else None
++            )
++            page_data[page_number] = (text, "embedded PDF text", image_bytes)
++            if image_bytes is not None and not gemini_document_mode:
++              gemini_jobs[page_number] = (image_bytes, text)
++            continue
++          image_bytes = render_page(document, page_number, mode)
++          try:
++            text = (
++                typhoon_transcribe(image_bytes)
++                if engine == "typhoon"
++                else worker.recognize(image_bytes)
++            )
++            text = (
++                text
++                or embedded_pdf_text(document[page_number - 1])
++                or "[เนเธกเนเธเธเธเนเธญเธเธงเธฒเธก]"
++            )
++            page_data[page_number] = (text, engine, image_bytes)
++            if (
++                use_gemini_correction
++                and not gemini_document_mode
++                and text
++                and not text.startswith("[")
++            ):
++              gemini_jobs[page_number] = (image_bytes, text)
++          except Exception as exc:
++            fallback = embedded_pdf_text(document[page_number - 1])
++            if fallback:
++              page_data[page_number] = (fallback, "embedded PDF text", image_bytes)
++            else:
++              errors.append((page_number, f"{type(exc).__name__}: {exc}"))
++              failed_images[page_number] = image_bytes
++
++        futures = {}
++        if gemini_jobs:
++          with ThreadPoolExecutor(
++              max_workers=min(GEMINI_MAX_WORKERS, len(gemini_jobs))
++          ) as executor:
++            for page_number, (image_bytes, source_text) in gemini_jobs.items():
++              futures[page_number] = executor.submit(
++                  gemini_correct_text, image_bytes, source_text, gemini_model
++              )
++            for page_number in range(batch_start, batch_end + 1):
++              if page_number not in page_data:
++                output.append(f"----- เธซเธเนเธฒ {page_number} -----\n[เธญเนเธฒเธเธซเธเนเธฒเธเธตเนเนเธกเนเธชเธณเน€เธฃเนเธ]")
++              else:
++                text, method, _ = page_data[page_number]
++                if page_number in futures:
++                  try:
++                    text = futures[page_number].result()
++                    method = "Gemini corrected"
++                  except Exception as correction_error:
++                    errors.append((
++                        page_number,
++                        f"Gemini เธ•เธฃเธงเธเนเธเนเนเธกเนเธชเธณเน€เธฃเนเธ: {correction_error}",
++                    ))
++                output.append(f"----- เธซเธเนเธฒ {page_number} | {method} -----\n{text}")
++              progress.progress(
++                  0.5 + (page_number / page_count) * 0.5,
++                  text=f"เธญเนเธฒเธเธซเธเนเธฒ {page_number}/{page_count} เน€เธชเธฃเนเธเนเธฅเนเธง",
++              )
++              publish_page()
++        else:
++          for page_number in range(batch_start, batch_end + 1):
++            if page_number not in page_data:
++              output.append(f"----- เธซเธเนเธฒ {page_number} -----\n[เธญเนเธฒเธเธซเธเนเธฒเธเธตเนเนเธกเนเธชเธณเน€เธฃเนเธ]")
++            else:
++              text, method, _ = page_data[page_number]
++              output.append(f"----- เธซเธเนเธฒ {page_number} | {method} -----\n{text}")
++            progress.progress(
++                0.5 + (page_number / page_count) * 0.5,
++                text=f"เธญเนเธฒเธเธซเธเนเธฒ {page_number}/{page_count} เน€เธชเธฃเนเธเนเธฅเนเธง",
++            )
++            publish_page()
+     finally:
+-        document.close()
++      if worker is not None:
++        worker.terminate()
++
++    local_output = "\n\n".join(output)
++    if gemini_document_mode and local_output:
++      progress.progress(0.85, text="เธเธณเธฅเธฑเธเธชเนเธ PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธซเน Gemini เธ•เธฃเธงเธเนเธเน")
++      try:
++        corrected_document = gemini_correct_document(
++            pdf_bytes, local_output, gemini_model
++        )
++        progress.progress(0.98, text="เธ•เธฃเธงเธเธชเธญเธเธฅเธณเธ”เธฑเธเนเธฅเธฐ marker เธซเธเนเธฒเนเธฅเนเธง")
++        return corrected_document, errors, failed_images
++      except Exception as correction_error:
++        errors.append((
++            None,
++            f"Gemini เธ•เธฃเธงเธเนเธเนเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ: {correction_error}",
++        ))
++    return local_output, errors, failed_images
++  finally:
++    document.close()
+ 
+ 
+ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> None:
+-    """Show a PDF viewer with built-in fit, zoom-in, and zoom-out controls."""
+-    if not pdf_bytes:
+-        st.error("เนเธกเนเธเธเธเนเธญเธกเธนเธฅ PDF เธชเธณเธซเธฃเธฑเธเนเธชเธ”เธเธ•เธฑเธงเธญเธขเนเธฒเธ")
+-        return
+-    display_name = filename or "document.pdf"
+-    encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+-    safe_name = json.dumps(display_name, ensure_ascii=False)
+-    viewer_html = f"""
++  """Show a PDF viewer with built-in fit, zoom-in, and zoom-out controls."""
++  if not pdf_bytes:
++    strlit.error("เนเธกเนเธเธเธเนเธญเธกเธนเธฅ PDF เธชเธณเธซเธฃเธฑเธเนเธชเธ”เธเธ•เธฑเธงเธญเธขเนเธฒเธ")
++    return
++  display_name = filename or "document.pdf"
++  encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
++  safe_name = json.dumps(display_name, ensure_ascii=False)
++  viewer_html = f"""
+     <!doctype html>
+     <html lang="th">
+       <head>
+@@ -775,26 +873,27 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> Non
+       </body>
+     </html>
+     """
+-    components.html(viewer_html, height=height, scrolling=False)
+-    st.download_button(
+-        "เธ”เธฒเธงเธเนเนเธซเธฅเธ” PDF เธ•เนเธเธเธเธฑเธ",
+-        data=pdf_bytes,
+-        file_name=display_name,
+-        mime="application/pdf",
+-        key=f"download-pdf-{hashlib.sha256(pdf_bytes).hexdigest()[:16]}",
+-        use_container_width=True,
+-    )
++  components.html(viewer_html, height=height, scrolling=False)
++  strlit.download_button(
++      "เธ”เธฒเธงเธเนเนเธซเธฅเธ” PDF เธ•เนเธเธเธเธฑเธ",
++      data=pdf_bytes,
++      file_name=display_name,
++      mime="application/pdf",
++      key=f"download-pdf-{hashlib.sha256(pdf_bytes).hexdigest()[:16]}",
++      use_container_width=True,
++  )
++
+ 
+ def inject_css() -> None:
+-    st.markdown(
+-        """
++  strlit.markdown(
++      """
+         <style>
+         :root { --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#dc2626; --accent-dark:#991b1b; --navy:#172554; }
+         html, body, button, input, textarea, select { font-family:"Segoe UI", "Noto Sans Thai", Tahoma, sans-serif !important; }
+         .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
+         header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
+         [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
+-        .block-container { max-width: 1200px; padding-top: 3.5rem; }
++        .block-container { max-width: 1400px; padding-top: 3.5rem; }
+         .mypdf-header { display:flex; align-items:center; gap:12px; margin-bottom:2rem; }
+         .mypdf-icon { background:var(--accent); color:#fff; border-radius:9px; padding:9px 12px; font-size:24px; box-shadow:0 4px 10px rgba(220,38,38,.2); }
+         .mypdf-name { font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.3px; }
+@@ -830,7 +929,6 @@ def inject_css() -> None:
+         aside[data-testid="stSidebar"] [data-baseweb="select"] * { color:#172033 !important; }
+         aside[data-testid="stSidebar"] [data-baseweb="select"] input, aside[data-testid="stSidebar"] [data-baseweb="select"] [role="combobox"] { color:#172033 !important; -webkit-text-fill-color:#172033 !important; }
+         .small-note { color:#64748b; font-size:13px; }
+-        /* Dark mode: keep every surface and text role readable together. */
+         .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] { background:#0b1220 !important; color:#f8fafc !important; }
+         .block-container { color:#f8fafc !important; }
+         .ocr-card { background:#111827 !important; border-color:#334155 !important; box-shadow:0 8px 24px rgba(0,0,0,.28) !important; }
+@@ -869,20 +967,25 @@ def inject_css() -> None:
+         }
+         </style>
+         """,
+-        unsafe_allow_html=True,
+-    )
++      unsafe_allow_html=True,
++  )
+ 
+ 
+-st.set_page_config(page_title="MyOCR PDF โ€” Thai", page_icon="๐“", layout="centered")
++strlit.set_page_config(
++    page_title="MyOCR PDF โ€” Thai", page_icon="๐“", layout="wide"
++)
+ inject_css()
+ 
+-st.markdown(
++strlit.markdown(
+     '<div class="mypdf-header"><div class="mypdf-icon">PDF</div>'
+     '<div class="mypdf-name"><span>MyOCR</span> PDF</div></div>',
+     unsafe_allow_html=True,
+ )
+-st.markdown('<div class="subtitle">เธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธ PDF เธชเนเธเธ โ€” เธ เธฒเธฉเธฒเนเธ—เธขเนเธฅเธฐเธ เธฒเธฉเธฒเธญเธฑเธเธเธคเธฉ</div>', unsafe_allow_html=True)
+-st.markdown(
++strlit.markdown(
++    '<div class="subtitle">เธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธ PDF เธชเนเธเธ โ€” เธ เธฒเธฉเธฒเนเธ—เธขเนเธฅเธฐเธ เธฒเธฉเธฒเธญเธฑเธเธเธคเธฉ</div>',
++    unsafe_allow_html=True,
++)
++strlit.markdown(
+     '<div class="workflow-steps" aria-label="เธเธฑเนเธเธ•เธญเธเธเธฒเธฃเนเธเนเธเธฒเธ">'
+     '<span class="workflow-step active">โ‘  เน€เธฅเธทเธญเธเนเธเธฅเน</span><span>โ’</span>'
+     '<span class="workflow-step">โ‘ก เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ</span><span>โ’</span>'
+@@ -891,268 +994,377 @@ st.markdown(
+     unsafe_allow_html=True,
+ )
+ 
+-with st.sidebar:
+-    st.header("เธ•เธฑเนเธเธเนเธฒเธเธฒเธฃเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ")
+-    st.caption("เธเธฑเนเธเธ—เธตเน 1: เน€เธฅเธทเธญเธเน€เธเธฃเธทเนเธญเธเธกเธทเธญเธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธ PDF")
+-    available_engines = available_ocr_engines()
+-    default_engine = available_engines[0]
+-    engine = st.radio(
+-        "เน€เธเธฃเธทเนเธญเธเธกเธทเธญเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ",
+-        available_engines,
+-        index=available_engines.index(default_engine),
+-        key="ocr_engine",
++with strlit.sidebar:
++  strlit.header("เธ•เธฑเนเธเธเนเธฒเธเธฒเธฃเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ")
++  strlit.caption("เธเธฑเนเธเธ—เธตเน 1: เน€เธฅเธทเธญเธเน€เธเธฃเธทเนเธญเธเธกเธทเธญเธญเนเธฒเธเธเนเธญเธเธงเธฒเธกเธเธฒเธ PDF")
++  available_engines = available_ocr_engines()
++  default_engine = available_engines[0]
++  engine = strlit.radio(
++      "เน€เธเธฃเธทเนเธญเธเธกเธทเธญเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ",
++      available_engines,
++      index=available_engines.index(default_engine),
++      key="ocr_engine",
++      format_func=lambda value: {
++          "typhoon": "Typhoon OCR โ€” เนเธเธฐเธเธณเธชเธณเธซเธฃเธฑเธเน€เธญเธเธชเธฒเธฃเนเธ—เธข",
++          "tesseract": "Tesseract โ€” เธญเนเธฒเธเนเธเน€เธเธฃเธทเนเธญเธ / Offline",
++      }[value],
++  )
++  engine = usable_ocr_engine(engine)
++  if not typhoon_api_key():
++    strlit.info("เนเธกเนเธกเธต Typhoon API key โ€” เธฃเธฐเธเธเนเธเน Tesseract เธญเธฑเธ•เนเธเธกเธฑเธ•เธด")
++  language = strlit.selectbox(
++      "เธ เธฒเธฉเธฒ",
++      ["tha+eng", "tha", "eng"],
++      index=0,
++      format_func=lambda value: {
++          "tha": "เนเธ—เธข",
++          "tha+eng": "เนเธ—เธข + เธญเธฑเธเธเธคเธฉ",
++          "eng": "เธญเธฑเธเธเธคเธฉ",
++      }[value],
++  )
++  mode = strlit.selectbox(
++      "เธเธฒเธฃเธเธฃเธฐเธกเธงเธฅเธเธฅเธ เธฒเธเธชเธณเธซเธฃเธฑเธ OCR",
++      ["best", "fast"],
++      format_func=lambda value: "เธเธกเธเธฑเธ”เธชเธนเธ" if value == "best" else "เน€เธฃเนเธง",
++      help=(
++          "เธกเธตเธเธฅเธซเธฅเธฑเธเธเธฑเธ Tesseract เน€เธ—เนเธฒเธเธฑเนเธ"
++          " เธฃเธฐเธเธเธเธฐเนเธเนเธเนเธญเธเธงเธฒเธกเธเธฑเธเนเธ PDF เธเนเธญเธเน€เธกเธทเนเธญเธกเธตเธญเธขเธนเนเนเธฅเนเธง"
++      ),
++  )
++  if engine == "tesseract":
++    psm = strlit.selectbox(
++        "เธฃเธนเธเนเธเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃ",
++        PSM_VALUES,
++        index=0,
+         format_func=lambda value: {
+-            "typhoon": "Typhoon OCR โ€” เนเธเธฐเธเธณเธชเธณเธซเธฃเธฑเธเน€เธญเธเธชเธฒเธฃเนเธ—เธข",
+-            "tesseract": "Tesseract โ€” เธญเนเธฒเธเนเธเน€เธเธฃเธทเนเธญเธ / Offline",
++            "3": "เน€เธญเธเธชเธฒเธฃเธ—เธฑเนเธงเนเธ",
++            "6": "เธเธฅเนเธญเธเธเนเธญเธเธงเธฒเธก / เธ•เธฒเธฃเธฒเธ",
++            "4": "เธเธญเธฅเธฑเธกเธเนเน€เธ”เธตเธขเธง",
+         }[value],
++        help=(
++            "เน€เธฅเธทเธญเธเธ•เธฒเธกเธฅเธฑเธเธฉเธ“เธฐเธเธฒเธฃเธเธฑเธ”เธงเธฒเธเธเนเธญเธเธงเธฒเธกเนเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃ"
++            " เธกเธตเธเธฅเน€เธเธเธฒเธฐเธเธฑเธ Tesseract"
++        ),
+     )
+-    engine = usable_ocr_engine(engine)
+-    if not typhoon_api_key():
+-        st.info("เนเธกเนเธกเธต Typhoon API key โ€” เธฃเธฐเธเธเนเธเน Tesseract เธญเธฑเธ•เนเธเธกเธฑเธ•เธด")
+-    language = st.selectbox(
+-        "เธ เธฒเธฉเธฒ",
+-        ["tha+eng", "tha", "eng"],
+-        index=0,
+-        format_func=lambda value: {"tha": "เนเธ—เธข", "tha+eng": "เนเธ—เธข + เธญเธฑเธเธเธคเธฉ", "eng": "เธญเธฑเธเธเธคเธฉ"}[value],
+-    )
+-    mode = st.selectbox(
+-        "เธเธฒเธฃเธเธฃเธฐเธกเธงเธฅเธเธฅเธ เธฒเธเธชเธณเธซเธฃเธฑเธ OCR",
+-        ["best", "fast"],
+-        format_func=lambda value: "เธเธกเธเธฑเธ”เธชเธนเธ" if value == "best" else "เน€เธฃเนเธง",
+-        help="เธกเธตเธเธฅเธซเธฅเธฑเธเธเธฑเธ Tesseract เน€เธ—เนเธฒเธเธฑเนเธ เธฃเธฐเธเธเธเธฐเนเธเนเธเนเธญเธเธงเธฒเธกเธเธฑเธเนเธ PDF เธเนเธญเธเน€เธกเธทเนเธญเธกเธตเธญเธขเธนเนเนเธฅเนเธง",
+-    )
+-    if engine == "tesseract":
+-        psm = st.selectbox(
+-            "เธฃเธนเธเนเธเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃ",
+-            PSM_VALUES,
+-            index=0,
+-            format_func=lambda value: {"3": "เน€เธญเธเธชเธฒเธฃเธ—เธฑเนเธงเนเธ", "6": "เธเธฅเนเธญเธเธเนเธญเธเธงเธฒเธก / เธ•เธฒเธฃเธฒเธ", "4": "เธเธญเธฅเธฑเธกเธเนเน€เธ”เธตเธขเธง"}[value],
+-            help="เน€เธฅเธทเธญเธเธ•เธฒเธกเธฅเธฑเธเธฉเธ“เธฐเธเธฒเธฃเธเธฑเธ”เธงเธฒเธเธเนเธญเธเธงเธฒเธกเนเธเธซเธเนเธฒเน€เธญเธเธชเธฒเธฃ เธกเธตเธเธฅเน€เธเธเธฒเธฐเธเธฑเธ Tesseract",
++  else:
++    psm = "6"
++  oem = OEM_LSTM_ONLY
++  gemini_key_available = bool(gemini_api_key())
++  if not gemini_key_available:
++    strlit.session_state["use_gemini_correction"] = False
++  strlit.caption("เธเธฑเนเธเธ—เธตเน 2: เน€เธฅเธทเธญเธเนเธซเน Gemini เธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธกเนเธ—เธขเธซเธฅเธฑเธเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ")
++  use_gemini_correction = strlit.checkbox(
++      "เนเธเน Gemini เธ•เธฃเธงเธเนเธเนเธชเธฃเธฐเนเธฅเธฐเธงเธฃเธฃเธ“เธขเธธเธเธ•เน",
++      value=False,
++      key="use_gemini_correction",
++      disabled=not gemini_key_available,
++      help=(
++          "Gemini เธเธฐเนเธเนเธ เธฒเธ PDF เธฃเนเธงเธกเธเธฑเธเธเนเธญเธเธงเธฒเธกเธ—เธตเนเธญเนเธฒเธเนเธ”เน เน€เธเธทเนเธญเนเธเนเธเธฑเธเธซเธฒ เน€เธเนเธ"
++          " เธเธณเธฃ/เธเธณเธขเธเธฃเธฑเธเธกเธเธ•เธฃเธต/เธงเนเธณ"
++      ),
++  )
++  gemini_model = GEMINI_MODEL
++  if use_gemini_correction and gemini_key_available:
++    try:
++      available_gemini_models = list_gemini_models()
++      if available_gemini_models:
++        recommended_models = [
++            model
++            for model in available_gemini_models
++            if gemini_model_is_recommended(str(model["name"]))
++        ]
++        show_advanced_models = strlit.checkbox(
++            "เนเธชเธ”เธ Gemini เธฃเธธเนเธเธเธฑเนเธเธชเธนเธเธ—เธฑเนเธเธซเธกเธ”",
++            value=False,
++            help=(
++                "เน€เธเธดเธ”เน€เธเธทเนเธญเธ”เธนเธฃเธธเนเธเน€เธเธเธฒเธฐเธ—เธฒเธ เน€เธเนเธ TTS, Image, Robotics"
++                " เนเธฅเธฐเธฃเธธเนเธเธ—เธ”เธฅเธญเธ"
++            ),
++        )
++        selectable_models = (
++            available_gemini_models
++            if show_advanced_models
++            else recommended_models
++        )
++        model_names = [str(model["name"]) for model in selectable_models]
++        if not model_names:
++          strlit.warning("เนเธกเนเธเธเธฃเธธเนเธเธ—เธตเนเนเธเธฐเธเธณ เธเธฐเนเธชเธ”เธเนเธกเน€เธ”เธฅเธ—เธฑเนเธเธซเธกเธ”เนเธ—เธ")
++          selectable_models = available_gemini_models
++          model_names = [str(model["name"]) for model in selectable_models]
++        default_index = (
++            model_names.index(GEMINI_MODEL)
++            if GEMINI_MODEL in model_names
++            else 0
++        )
++        gemini_model = strlit.selectbox(
++            "เธฃเธธเนเธ Gemini เธชเธณเธซเธฃเธฑเธเธ•เธฃเธงเธเนเธเน",
++            model_names,
++            index=default_index,
++            format_func=gemini_model_option_label,
++            help=(
++                "เธเนเธฒเน€เธฃเธดเนเธกเธ•เนเธเธเธฐเนเธชเธ”เธเน€เธเธเธฒเธฐเธฃเธธเนเธเธ—เธตเนเน€เธซเธกเธฒเธฐเธเธฑเธเธเธฒเธฃเธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธกเนเธฅเธฐเธ เธฒเธ"
++                " PDF"
++            ),
++        )
++        selected_metadata = next(
++            model for model in selectable_models if model["name"] == gemini_model
++        )
++        strlit.markdown("**เธฃเธธเนเธเธ—เธตเนเน€เธฅเธทเธญเธ**")
++        strlit.caption(str(selected_metadata["description"]))
++        strlit.caption(f"เธเธฃเธฐเน€เธ เธ—: {gemini_model_kind(gemini_model)}")
++        strlit.caption(
++            f"เธฃเธฑเธเน€เธเนเธฒเนเธ”เน:"
++            f" {format_token_limit(selected_metadata['input_token_limit'])} ยท"
++            f" เธ•เธญเธเธเธฅเธฑเธเนเธ”เน:"
++            f" {format_token_limit(selected_metadata['output_token_limit'])}"
++        )
++        profile = gemini_model_profile(gemini_model)
++        strlit.markdown("**เธเธฐเนเธเธเนเธ”เธขเธเธฃเธฐเธกเธฒเธ“เธชเธณเธซเธฃเธฑเธเธเธฒเธเธ•เธฃเธงเธเนเธเน OCR**")
++        strlit.markdown(
++            gemini_rating_html(
++                "เธเธธเธ“เธ เธฒเธเธเธฒเธฃเนเธเนเธเนเธญเธเธงเธฒเธก",
++                profile["quality"],
++                "1 เธ”เธฒเธง = เธ•เนเธณ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เธชเธนเธ",
++            ),
++            unsafe_allow_html=True,
+         )
++        strlit.markdown(
++            gemini_rating_html(
++                "เธเธงเธฒเธกเน€เธฃเนเธง",
++                profile["speed"],
++                "1 เธ”เธฒเธง = เธเนเธฒ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เน€เธฃเนเธงเธกเธฒเธ",
++            ),
++            unsafe_allow_html=True,
++        )
++        strlit.markdown(
++            gemini_rating_html(
++                "เธเธงเธฒเธกเน€เธเนเธฒเนเธเธ เธฒเธ/PDF",
++                profile["vision"],
++                (
++                    "1 เธ”เธฒเธง = เธเธณเธเธฑเธ”, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เน€เธซเธกเธฒเธฐเธเธฑเธเธ เธฒเธเธกเธฒเธ"
++                ),
++            ),
++            unsafe_allow_html=True,
++        )
++        strlit.markdown(
++            gemini_rating_html(
++                "เธเธงเธฒเธกเธเธฃเธฐเธซเธขเธฑเธ”เนเธ”เธขเธเธฃเธฐเธกเธฒเธ“",
++                profile["economy"],
++                (
++                    "1 เธ”เธฒเธง = เนเธเนเธ—เธฃเธฑเธเธขเธฒเธเธฃเธกเธฒเธ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง ="
++                    " เธเธฃเธฐเธซเธขเธฑเธ”เธกเธฒเธ"
++                ),
++            ),
++            unsafe_allow_html=True,
++        )
++        strlit.info(f"เน€เธซเธกเธฒเธฐเธเธฑเธ: {profile['best_for']}")
++        strlit.caption(
++            "เธเธฐเนเธเธเธ”เธฒเธงเน€เธเนเธเธเธณเนเธเธฐเธเธณเนเธ”เธขเธเธฃเธฐเธกเธฒเธ“เธเธฒเธเธ•เธฃเธฐเธเธนเธฅเนเธกเน€เธ”เธฅ"
++            " เนเธกเนเนเธเนเธเธฐเนเธเธเธ—เธฒเธเธเธฒเธฃเธเธญเธ Google เนเธฅเธฐเธฃเธฒเธเธฒ/เนเธเธงเธ•เธฒเธเธฃเธดเธเธเธถเนเธเธเธฑเธเธเธฑเธเธเธตเธเธญเธเธเธธเธ“"
++        )
++        strlit.caption(
++            "PDF: เน€เธกเธทเนเธญเน€เธฃเธดเนเธกเธ•เธฃเธงเธเนเธเน เธฃเธฐเธเธเธเธฐเธชเนเธ PDF"
++            " เธ•เนเธเธเธเธฑเธเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธเธขเธฑเธเนเธกเน€เธ”เธฅเธ—เธตเนเน€เธฅเธทเธญเธเนเธเธเธณเธเธญเน€เธ”เธตเธขเธง"
++        )
++        strlit.caption(
++            f"เนเธชเธ”เธ {len(selectable_models)} เธเธฒเธ"
++            f" {len(available_gemini_models)} เนเธกเน€เธ”เธฅเธ—เธตเนเนเธเนเนเธ”เน"
++        )
++      else:
++        strlit.error("เนเธกเนเธเธ Gemini model เธ—เธตเนเธฃเธญเธเธฃเธฑเธ generateContent")
++    except Exception as exc:
++      strlit.error(f"เธ•เธฃเธงเธเธชเธญเธ Gemini model เนเธกเนเธชเธณเน€เธฃเนเธ: {exc}")
++      gemini_model = strlit.text_input("เธเธทเนเธญ Gemini model เธชเธณเธฃเธญเธ", value=GEMINI_MODEL)
++  if engine == "typhoon":
++    if typhoon_api_key():
++      strlit.success("เธเธฃเนเธญเธกเนเธเน Typhoon OCR")
++      strlit.caption("เธ เธฒเธเนเธ•เนเธฅเธฐเธซเธเนเธฒเธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Typhoon OCR API")
+     else:
+-        psm = "6"
+-    oem = OEM_LSTM_ONLY
+-    gemini_key_available = bool(gemini_api_key())
+-    if not gemini_key_available:
+-        # Reset a stale browser/session value so a previous checked state
+-        # cannot enable a provider that is unavailable in this deployment.
+-        st.session_state["use_gemini_correction"] = False
+-    st.caption("เธเธฑเนเธเธ—เธตเน 2: เน€เธฅเธทเธญเธเนเธซเน Gemini เธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธกเนเธ—เธขเธซเธฅเธฑเธเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ")
+-    use_gemini_correction = st.checkbox(
+-        "เนเธเน Gemini เธ•เธฃเธงเธเนเธเนเธชเธฃเธฐเนเธฅเธฐเธงเธฃเธฃเธ“เธขเธธเธเธ•เน",
+-        value=False,
+-        key="use_gemini_correction",
+-        disabled=not gemini_key_available,
+-        help="Gemini เธเธฐเนเธเนเธ เธฒเธ PDF เธฃเนเธงเธกเธเธฑเธเธเนเธญเธเธงเธฒเธกเธ—เธตเนเธญเนเธฒเธเนเธ”เน เน€เธเธทเนเธญเนเธเนเธเธฑเธเธซเธฒ เน€เธเนเธ เธเธณเธฃ/เธเธณเธขเธเธฃเธฑเธเธกเธเธ•เธฃเธต/เธงเนเธณ",
++      strlit.warning(
++          "เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ TYPHOON_OCR_API_KEY โ€” เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธ Tesseract"
++          " เธซเธฃเธทเธญเน€เธเธดเนเธก API key เนเธ Render Environment Variables"
++      )
++  elif tesseract_path():
++    strlit.success("เธเธฃเนเธญเธกเนเธเน Tesseract เนเธเน€เธเธฃเธทเนเธญเธ")
++  else:
++    strlit.error("เนเธกเนเธเธ Tesseract")
++  if use_gemini_correction:
++    strlit.warning(
++        "Gemini เธเธฐเธ•เธฃเธงเธ PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธเธเธณเธเธญเน€เธ”เธตเธขเธง เนเธ”เธขเธชเนเธเนเธเธฅเนเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR"
++        " เนเธเธขเธฑเธ Google Gemini เธญเธฒเธเนเธเนเนเธเธงเธ•เธฒ API เนเธฅเธฐเนเธกเนเธเธงเธฃเนเธเนเธเธฑเธเน€เธญเธเธชเธฒเธฃเธฅเธฑเธเธซเธฒเธเนเธกเนเนเธ”เนเธฃเธฑเธเธญเธเธธเธเธฒเธ•"
+     )
+-    gemini_model = GEMINI_MODEL
+-    if use_gemini_correction and gemini_key_available:
+-        try:
+-            available_gemini_models = list_gemini_models()
+-            if available_gemini_models:
+-                recommended_models = [
+-                    model for model in available_gemini_models
+-                    if gemini_model_is_recommended(str(model["name"]))
+-                ]
+-                show_advanced_models = st.checkbox(
+-                    "เนเธชเธ”เธ Gemini เธฃเธธเนเธเธเธฑเนเธเธชเธนเธเธ—เธฑเนเธเธซเธกเธ”",
+-                    value=False,
+-                    help="เน€เธเธดเธ”เน€เธเธทเนเธญเธ”เธนเธฃเธธเนเธเน€เธเธเธฒเธฐเธ—เธฒเธ เน€เธเนเธ TTS, Image, Robotics เนเธฅเธฐเธฃเธธเนเธเธ—เธ”เธฅเธญเธ",
+-                )
+-                selectable_models = available_gemini_models if show_advanced_models else recommended_models
+-                model_names = [str(model["name"]) for model in selectable_models]
+-                if not model_names:
+-                    st.warning("เนเธกเนเธเธเธฃเธธเนเธเธ—เธตเนเนเธเธฐเธเธณ เธเธฐเนเธชเธ”เธเนเธกเน€เธ”เธฅเธ—เธฑเนเธเธซเธกเธ”เนเธ—เธ")
+-                    selectable_models = available_gemini_models
+-                    model_names = [str(model["name"]) for model in selectable_models]
+-                default_index = (
+-                    model_names.index(GEMINI_MODEL)
+-                    if GEMINI_MODEL in model_names else 0
+-                )
+-                gemini_model = st.selectbox(
+-                    "เธฃเธธเนเธ Gemini เธชเธณเธซเธฃเธฑเธเธ•เธฃเธงเธเนเธเน",
+-                    model_names,
+-                    index=default_index,
+-                    format_func=gemini_model_option_label,
+-                    help="เธเนเธฒเน€เธฃเธดเนเธกเธ•เนเธเธเธฐเนเธชเธ”เธเน€เธเธเธฒเธฐเธฃเธธเนเธเธ—เธตเนเน€เธซเธกเธฒเธฐเธเธฑเธเธเธฒเธฃเธ•เธฃเธงเธเนเธเนเธเนเธญเธเธงเธฒเธกเนเธฅเธฐเธ เธฒเธ PDF",
+-                )
+-                selected_metadata = next(model for model in selectable_models if model["name"] == gemini_model)
+-                st.markdown("**เธฃเธธเนเธเธ—เธตเนเน€เธฅเธทเธญเธ**")
+-                st.caption(str(selected_metadata["description"]))
+-                st.caption(f"เธเธฃเธฐเน€เธ เธ—: {gemini_model_kind(gemini_model)}")
+-                st.caption(
+-                    f"เธฃเธฑเธเน€เธเนเธฒเนเธ”เน: {format_token_limit(selected_metadata['input_token_limit'])} ยท "
+-                    f"เธ•เธญเธเธเธฅเธฑเธเนเธ”เน: {format_token_limit(selected_metadata['output_token_limit'])}"
+-                )
+-                profile = gemini_model_profile(gemini_model)
+-                st.markdown("**เธเธฐเนเธเธเนเธ”เธขเธเธฃเธฐเธกเธฒเธ“เธชเธณเธซเธฃเธฑเธเธเธฒเธเธ•เธฃเธงเธเนเธเน OCR**")
+-                st.markdown(
+-                    gemini_rating_html("เธเธธเธ“เธ เธฒเธเธเธฒเธฃเนเธเนเธเนเธญเธเธงเธฒเธก", profile["quality"], "1 เธ”เธฒเธง = เธ•เนเธณ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เธชเธนเธ"),
+-                    unsafe_allow_html=True,
+-                )
+-                st.markdown(
+-                    gemini_rating_html("เธเธงเธฒเธกเน€เธฃเนเธง", profile["speed"], "1 เธ”เธฒเธง = เธเนเธฒ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เน€เธฃเนเธงเธกเธฒเธ"),
+-                    unsafe_allow_html=True,
+-                )
+-                st.markdown(
+-                    gemini_rating_html("เธเธงเธฒเธกเน€เธเนเธฒเนเธเธ เธฒเธ/PDF", profile["vision"], "1 เธ”เธฒเธง = เธเธณเธเธฑเธ”, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เน€เธซเธกเธฒเธฐเธเธฑเธเธ เธฒเธเธกเธฒเธ"),
+-                    unsafe_allow_html=True,
+-                )
+-                st.markdown(
+-                    gemini_rating_html("เธเธงเธฒเธกเธเธฃเธฐเธซเธขเธฑเธ”เนเธ”เธขเธเธฃเธฐเธกเธฒเธ“", profile["economy"], "1 เธ”เธฒเธง = เนเธเนเธ—เธฃเธฑเธเธขเธฒเธเธฃเธกเธฒเธ, 3 เธ”เธฒเธง = เธเธฒเธเธเธฅเธฒเธ, 5 เธ”เธฒเธง = เธเธฃเธฐเธซเธขเธฑเธ”เธกเธฒเธ"),
+-                    unsafe_allow_html=True,
+-                )
+-                st.info(f"เน€เธซเธกเธฒเธฐเธเธฑเธ: {profile['best_for']}")
+-                st.caption("เธเธฐเนเธเธเธ”เธฒเธงเน€เธเนเธเธเธณเนเธเธฐเธเธณเนเธ”เธขเธเธฃเธฐเธกเธฒเธ“เธเธฒเธเธ•เธฃเธฐเธเธนเธฅเนเธกเน€เธ”เธฅ เนเธกเนเนเธเนเธเธฐเนเธเธเธ—เธฒเธเธเธฒเธฃเธเธญเธ Google เนเธฅเธฐเธฃเธฒเธเธฒ/เนเธเธงเธ•เธฒเธเธฃเธดเธเธเธถเนเธเธเธฑเธเธเธฑเธเธเธตเธเธญเธเธเธธเธ“")
+-                st.caption("PDF: เน€เธกเธทเนเธญเน€เธฃเธดเนเธกเธ•เธฃเธงเธเนเธเน เธฃเธฐเธเธเธเธฐเธชเนเธ PDF เธ•เนเธเธเธเธฑเธเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธเธขเธฑเธเนเธกเน€เธ”เธฅเธ—เธตเนเน€เธฅเธทเธญเธเนเธเธเธณเธเธญเน€เธ”เธตเธขเธง")
+-                st.caption(f"เนเธชเธ”เธ {len(selectable_models)} เธเธฒเธ {len(available_gemini_models)} เนเธกเน€เธ”เธฅเธ—เธตเนเนเธเนเนเธ”เน")
+-            else:
+-                st.error("เนเธกเนเธเธ Gemini model เธ—เธตเนเธฃเธญเธเธฃเธฑเธ generateContent")
+-        except Exception as exc:
+-            st.error(f"เธ•เธฃเธงเธเธชเธญเธ Gemini model เนเธกเนเธชเธณเน€เธฃเนเธ: {exc}")
+-            gemini_model = st.text_input("เธเธทเนเธญ Gemini model เธชเธณเธฃเธญเธ", value=GEMINI_MODEL)
+-    if engine == "typhoon":
+-        if typhoon_api_key():
+-            st.success("เธเธฃเนเธญเธกเนเธเน Typhoon OCR")
+-            st.caption("เธ เธฒเธเนเธ•เนเธฅเธฐเธซเธเนเธฒเธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Typhoon OCR API")
+-        else:
+-            st.warning("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ TYPHOON_OCR_API_KEY โ€” เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธ Tesseract เธซเธฃเธทเธญเน€เธเธดเนเธก API key เนเธ Render Environment Variables")
+-    elif tesseract_path():
+-        st.success("เธเธฃเนเธญเธกเนเธเน Tesseract เนเธเน€เธเธฃเธทเนเธญเธ")
+-    else:
+-        st.error("เนเธกเนเธเธ Tesseract")
+-    if use_gemini_correction:
+-        st.warning("Gemini เธเธฐเธ•เธฃเธงเธ PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธเธเธณเธเธญเน€เธ”เธตเธขเธง เนเธ”เธขเธชเนเธเนเธเธฅเนเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR เนเธเธขเธฑเธ Google Gemini เธญเธฒเธเนเธเนเนเธเธงเธ•เธฒ API เนเธฅเธฐเนเธกเนเธเธงเธฃเนเธเนเธเธฑเธเน€เธญเธเธชเธฒเธฃเธฅเธฑเธเธซเธฒเธเนเธกเนเนเธ”เนเธฃเธฑเธเธญเธเธธเธเธฒเธ•")
+-    elif not gemini_key_available:
+-        st.info("เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY โ€” เธเธดเธ”เธเธฒเธฃเธ•เธฃเธงเธเนเธเน Gemini เนเธงเน เนเธฅเธฐเธเธฐเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเธ”เนเธงเธข OCR เธ•เธฒเธกเธเธเธ•เธด")
+-    st.caption("เธฃเธญเธเธฃเธฑเธ PDF เธชเธนเธเธชเธธเธ” 50 MB / 100 เธซเธเนเธฒ")
+-
+-st.markdown('<div class="ocr-card">', unsafe_allow_html=True)
+-uploaded = st.file_uploader(
++  elif not gemini_key_available:
++    strlit.info(
++        "เธขเธฑเธเนเธกเนเนเธ”เนเธ•เธฑเนเธเธเนเธฒ GEMINI_API_KEY โ€” เธเธดเธ”เธเธฒเธฃเธ•เธฃเธงเธเนเธเน Gemini เนเธงเน"
++        " เนเธฅเธฐเธเธฐเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเธ”เนเธงเธข OCR เธ•เธฒเธกเธเธเธ•เธด"
++    )
++  strlit.caption("เธฃเธญเธเธฃเธฑเธ PDF เธชเธนเธเธชเธธเธ” 50 MB / 100 เธซเธเนเธฒ")
++
++strlit.markdown('<div class="ocr-card">', unsafe_allow_html=True)
++uploaded = strlit.file_uploader(
+     "เน€เธฅเธทเธญเธเนเธเธฅเน PDF เน€เธเธทเนเธญเน€เธฃเธดเนเธกเธ•เนเธ",
+     type=["pdf"],
+     accept_multiple_files=False,
+     help="เธฃเธญเธเธฃเธฑเธเน€เธเธเธฒเธฐเนเธเธฅเน .pdf เน€เธ—เนเธฒเธเธฑเนเธ เธซเธฒเธเธกเธตเนเธเธฅเน Word เนเธซเนเธเธฑเธเธ—เธถเธเน€เธเนเธ PDF เธเนเธญเธ",
+ )
+ uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
+-uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
+-previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
+-if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
+-    st.session_state.pop("ocr_text", None)
+-    st.session_state.pop("ocr_status", None)
+-    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
++uploaded_fingerprint = (
++    hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
++)
++previous_fingerprint = strlit.session_state.get("ocr_file_fingerprint", "")
++if (
++    uploaded_fingerprint
++    and previous_fingerprint
++    and uploaded_fingerprint != previous_fingerprint
++):
++  strlit.session_state.pop("ocr_text", None)
++  strlit.session_state.pop("ocr_status", None)
++  strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+ elif uploaded_fingerprint and not previous_fingerprint:
+-    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
++  strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+ if uploaded is not None:
+-    st.success(f"เน€เธฅเธทเธญเธเนเธเธฅเนเนเธฅเนเธง: {uploaded.name} ยท {uploaded.size / 1024:.1f} KB")
+-    if uploaded_fingerprint != st.session_state.get("ocr_result_fingerprint"):
+-        st.info("เนเธเธฅเนเธเธตเนเธขเธฑเธเนเธกเนเนเธ”เนเธเธฃเธฐเธกเธงเธฅเธเธฅ เธซเธฃเธทเธญเนเธเธฅเนเธ–เธนเธเน€เธเธฅเธตเนเธขเธเนเธฅเนเธง เธเธฃเธธเธ“เธฒเธเธ”เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ")
++  strlit.success(
++      f"เน€เธฅเธทเธญเธเนเธเธฅเนเนเธฅเนเธง: {uploaded.name} ยท {uploaded.size / 1024:.1f} KB"
++  )
++  if uploaded_fingerprint != strlit.session_state.get("ocr_result_fingerprint"):
++    strlit.info(
++        "เนเธเธฅเนเธเธตเนเธขเธฑเธเนเธกเนเนเธ”เนเธเธฃเธฐเธกเธงเธฅเธเธฅ เธซเธฃเธทเธญเนเธเธฅเนเธ–เธนเธเน€เธเธฅเธตเนเธขเธเนเธฅเนเธง เธเธฃเธธเธ“เธฒเธเธ”เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ"
++    )
+ else:
+-    st.info("เน€เธฅเธทเธญเธเนเธเธฅเน PDF เน€เธเธทเนเธญเน€เธฃเธดเนเธกเธ•เนเธ")
++  strlit.info("เน€เธฅเธทเธญเธเนเธเธฅเน PDF เน€เธเธทเนเธญเน€เธฃเธดเนเธกเธ•เนเธ")
+ if uploaded is not None and use_gemini_correction:
+-    st.info("เธเธงเธฒเธกเน€เธเนเธเธชเนเธงเธเธ•เธฑเธง: PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR เธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Google Gemini เน€เธเธทเนเธญเธเนเธงเธขเธ•เธฃเธงเธเนเธเน")
++  strlit.info(
++      "เธเธงเธฒเธกเน€เธเนเธเธชเนเธงเธเธ•เธฑเธง: PDF เธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธฅเธฐเธเนเธญเธเธงเธฒเธก OCR เธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Google"
++      " Gemini เน€เธเธทเนเธญเธเนเธงเธขเธ•เธฃเธงเธเนเธเน"
++  )
+ elif uploaded is not None and engine == "typhoon":
+-    st.info("เธเธงเธฒเธกเน€เธเนเธเธชเนเธงเธเธ•เธฑเธง: เธ เธฒเธเนเธ•เนเธฅเธฐเธซเธเนเธฒเธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Typhoon OCR API")
+-run = st.button("๐” เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ", type="primary", use_container_width=True)
+-st.markdown('</div>', unsafe_allow_html=True)
++  strlit.info("เธเธงเธฒเธกเน€เธเนเธเธชเนเธงเธเธ•เธฑเธง: เธ เธฒเธเนเธ•เนเธฅเธฐเธซเธเนเธฒเธเธฐเธ–เธนเธเธชเนเธเนเธเธขเธฑเธ Typhoon OCR API")
++run = strlit.button("๐” เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ", type="primary", use_container_width=True)
++strlit.markdown("</div>", unsafe_allow_html=True)
+ 
+ comparison_text = None
+ if uploaded is not None:
+-    st.markdown("### เธ•เธฃเธงเธเน€เธ—เธตเธขเธ PDF เธเธฑเธเธเนเธญเธเธงเธฒเธก OCR")
+-    st.caption("PDF เธ•เนเธเธเธเธฑเธ โ€” viewer เธเธฃเธฑเธเน€เธ•เนเธกเธเธงเธฒเธกเธเธงเนเธฒเธเน€เธเธทเนเธญเนเธกเนเนเธซเนเธซเธเนเธฒเธเธฃเธฐเธ”เธฒเธฉเธ–เธนเธเธ•เธฑเธ”")
+-    render_pdf_viewer(uploaded_bytes, uploaded.name, height=620)
+-    st.caption("เธเนเธญเธเธงเธฒเธกเธ—เธตเนเธ–เธญเธ”เนเธ”เน")
+-    current_result = st.session_state.get("ocr_text", "")
+-    result_fingerprint = st.session_state.get("ocr_result_fingerprint")
++  strlit.markdown("### เธ•เธฃเธงเธเน€เธ—เธตเธขเธ PDF เธเธฑเธเธเนเธญเธเธงเธฒเธก OCR")
++  col_pdf, col_ocr = strlit.columns(2)
++
++  with col_pdf:
++    strlit.markdown("**PDF เธ•เนเธเธเธเธฑเธ**")
++    render_pdf_viewer(uploaded_bytes, uploaded.name, height=650)
++
++  with col_ocr:
++    strlit.markdown("**เธเธฅเธฅเธฑเธเธเนเธเนเธญเธเธงเธฒเธก OCR**")
++    current_result = strlit.session_state.get("ocr_text", "")
++    result_fingerprint = strlit.session_state.get("ocr_result_fingerprint")
+     if result_fingerprint != uploaded_fingerprint:
+-        current_result = "เนเธเธฅเนเธเธตเนเธขเธฑเธเนเธกเนเธกเธตเธเธฅ OCR โ€” เธเธ” โ€เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃโ€ เน€เธเธทเนเธญเธเธฃเธฐเธกเธงเธฅเธเธฅ"
+-    comparison_text = st.empty()
++      current_result = (
++          "เนเธเธฅเนเธเธตเนเธขเธฑเธเนเธกเนเธกเธตเธเธฅ OCR โ€” เธเธ” 'เน€เธฃเธดเนเธกเธญเนเธฒเธเน€เธญเธเธชเธฒเธฃ' เน€เธเธทเนเธญเธเธฃเธฐเธกเธงเธฅเธเธฅ"
++      )
++    comparison_text = strlit.empty()
+     comparison_text.text_area(
+         "เธเธฅ OCR",
+         current_result,
+-        height=420,
+-        label_visibility="visible",
++        height=630,
++        label_visibility="collapsed",
+         key="ocr-preview",
+     )
+ 
+ if run:
+-    if uploaded is None:
+-        st.warning("เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธเนเธเธฅเน PDF เธเนเธญเธเน€เธฃเธดเนเธก OCR")
+-        st.stop()
+-    progress = st.progress(0, text="เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเนเธเธฅเน... (0%)")
+-    live_output = comparison_text if comparison_text is not None else st.empty()
++  if uploaded is None:
++    strlit.warning("เธเธฃเธธเธ“เธฒเน€เธฅเธทเธญเธเนเธเธฅเน PDF เธเนเธญเธเน€เธฃเธดเนเธก OCR")
++    strlit.stop()
++  progress = strlit.progress(0, text="เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเนเธเธฅเน... (0%)")
++  live_output = (
++      comparison_text if comparison_text is not None else strlit.empty()
++  )
++  live_output.text_area(
++      "เธเธฅ OCR",
++      (
++          "เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเธเธฅเธซเธเนเธฒเนเธฃเธ... เธเธฅเธฅเธฑเธเธเนเธเธตเนเธญเธฒเธเธ–เธนเธเธ•เธฃเธงเธเนเธเนเนเธซเธกเนเน€เธกเธทเนเธญเธญเนเธฒเธเธเธฃเธเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃ"
++      ),
++      height=630,
++      label_visibility="collapsed",
++      key="ocr-live",
++  )
++
++
++  def publish_live_text(text: str) -> None:
++    live_output.text(text)
++
++
++  try:
++    text, errors, failed_images = extract_pdf(
++        uploaded_bytes,
++        language,
++        mode,
++        psm,
++        oem,
++        engine,
++        use_gemini_correction,
++        gemini_model,
++        progress,
++        publish_live_text,
++    )
++    progress.progress(1.0, text="เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเธชเธกเธเธนเธฃเธ“เน (100%)")
++    strlit.session_state["ocr_text"] = text
++    strlit.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+     live_output.text_area(
+-        "เธ•เธฑเธงเธญเธขเนเธฒเธเธเธฅเธฃเธฐเธซเธงเนเธฒเธเธเธฃเธฐเธกเธงเธฅเธเธฅ",
+-        "เธเธณเธฅเธฑเธเน€เธ•เธฃเธตเธขเธกเธเธฅเธซเธเนเธฒเนเธฃเธ... เธเธฅเธฅเธฑเธเธเนเธเธตเนเธญเธฒเธเธ–เธนเธเธ•เธฃเธงเธเนเธเนเนเธซเธกเนเน€เธกเธทเนเธญเธญเนเธฒเธเธเธฃเธเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃ",
+-        height=680,
+-        label_visibility="visible",
+-        key="ocr-live",
++        "เธเธฅ OCR",
++        text,
++        height=630,
++        label_visibility="collapsed",
++        key="ocr-final",
+     )
+-
+-    def publish_live_text(text: str) -> None:
+-        # Do not create another keyed widget from the callback. Streamlit
+-        # treats each text_area call as a new widget, even in the same
+-        # placeholder, so reusing key="ocr-live" causes DuplicateElementKey.
+-        live_output.text(text)
+-
+-    try:
+-        text, errors, failed_images = extract_pdf(
+-            uploaded_bytes, language, mode, psm, oem, engine,
+-            use_gemini_correction, gemini_model, progress, publish_live_text,
+-        )
+-        progress.progress(1.0, text="เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเธชเธกเธเธนเธฃเธ“เน (100%)")
+-        st.session_state["ocr_text"] = text
+-        st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+-        live_output.text_area(
+-            "เธเธฅ OCR",
+-            text,
+-            height=680,
+-            label_visibility="visible",
+-            key="ocr-final",
+-        )
+-        document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
+-        page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
+-        if use_gemini_correction and document_errors:
+-            result_status = "fallback"
+-            st.warning("เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเนเธฅเนเธง เนเธ•เนเนเธเนเธเธฅ OCR เนเธเน€เธเธฃเธทเนเธญเธเนเธ—เธ Gemini เน€เธเธทเนเธญเธเธเธฒเธเธเธฒเธฃเธ•เธฃเธงเธเนเธเนเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ")
+-        elif page_errors:
+-            result_status = "partial"
+-            st.warning(f"เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเนเธฅเนเธง เนเธ•เนเธกเธต {len(page_errors)} เธซเธเนเธฒเธ—เธตเนเธเธงเธฃเธ•เธฃเธงเธเธชเธญเธ")
+-        elif use_gemini_correction:
+-            result_status = "gemini"
+-            st.success("เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเนเธฅเธฐเธ•เธฃเธงเธเนเธเนเธ”เนเธงเธข Gemini เธชเธณเน€เธฃเนเธ")
+-        else:
+-            result_status = "local"
+-            st.success("เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเธชเธณเน€เธฃเนเธเธ”เนเธงเธข OCR เนเธเน€เธเธฃเธทเนเธญเธ")
+-        st.session_state["ocr_status"] = result_status
+-        stem = Path(uploaded.name).stem
+-        st.download_button(
+-            "โฌ๏ธ เธ”เธฒเธงเธเนเนเธซเธฅเธ”เธเธฅ OCR เน€เธเนเธ .txt",
+-            data="\ufeff" + text,
+-            file_name=f"{stem}-ocr.txt",
+-            mime="text/plain;charset=utf-8",
+-            use_container_width=True,
+-        )
+-        if document_errors:
+-            with st.expander(f"เธเธฑเธเธซเธฒเธฃเธฐเธ”เธฑเธเน€เธญเธเธชเธฒเธฃ ({len(document_errors)})"):
+-                for _, error in document_errors:
+-                    st.error(error)
+-        if page_errors:
+-            with st.expander(f"เธซเธเนเธฒเธ—เธตเนเธเธงเธฃเธ•เธฃเธงเธเธชเธญเธ ({len(page_errors)})"):
+-                for page_number, error in page_errors:
+-                    st.error(f"เธซเธเนเธฒ {page_number}: {error}")
+-                    failed_image = failed_images.get(page_number)
+-                    if failed_image is not None:
+-                        st.download_button(
+-                            f"เธ”เธฒเธงเธเนเนเธซเธฅเธ”เธ เธฒเธเธซเธเนเธฒ {page_number}",
+-                            data=failed_image,
+-                            file_name=f"{stem}-page-{page_number}-failed.png",
+-                            mime="image/png",
+-                            key=f"failed-{page_number}",
+-                        )
+-    except Exception as exc:
+-        progress.progress(1.0, text="OCR เนเธกเนเธชเธณเน€เธฃเนเธ (100%)")
+-        st.session_state.pop("ocr_text", None)
+-        st.session_state.pop("ocr_result_fingerprint", None)
+-        st.session_state["ocr_status"] = "failed"
+-        st.error(f"เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ: {type(exc).__name__}: {exc}")
++    document_errors = [
++        (page_number, error) for page_number, error in errors if page_number is None
++    ]
++    page_errors = [
++        (page_number, error)
++        for page_number, error in errors
++        if page_number is not None
++    ]
++    if use_gemini_correction and document_errors:
++      result_status = "fallback"
++      strlit.warning(
++          "เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเนเธฅเนเธง เนเธ•เนเนเธเนเธเธฅ OCR เนเธเน€เธเธฃเธทเนเธญเธเนเธ—เธ Gemini เน€เธเธทเนเธญเธเธเธฒเธเธเธฒเธฃเธ•เธฃเธงเธเนเธเนเธ—เธฑเนเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ"
++      )
++    elif page_errors:
++      result_status = "partial"
++      strlit.warning(f"เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเน€เธชเธฃเนเธเนเธฅเนเธง เนเธ•เนเธกเธต {len(page_errors)} เธซเธเนเธฒเธ—เธตเนเธเธงเธฃเธ•เธฃเธงเธเธชเธญเธ")
++    elif use_gemini_correction:
++      result_status = "gemini"
++      strlit.success("เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเนเธฅเธฐเธ•เธฃเธงเธเนเธเนเธ”เนเธงเธข Gemini เธชเธณเน€เธฃเนเธ")
++    else:
++      result_status = "local"
++      strlit.success("เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเธชเธณเน€เธฃเนเธเธ”เนเธงเธข OCR เนเธเน€เธเธฃเธทเนเธญเธ")
++    strlit.session_state["ocr_status"] = result_status
++    stem = Path(uploaded.name).stem
++    strlit.download_button(
++        "โฌ๏ธ เธ”เธฒเธงเธเนเนเธซเธฅเธ”เธเธฅ OCR เน€เธเนเธ .txt",
++        data="\ufeff" + text,
++        file_name=f"{stem}-ocr.txt",
++        mime="text/plain;charset=utf-8",
++        use_container_width=True,
++    )
++    if document_errors:
++      with strlit.expander(f"เธเธฑเธเธซเธฒเธฃเธฐเธ”เธฑเธเน€เธญเธเธชเธฒเธฃ ({len(document_errors)})"):
++        for _, error in document_errors:
++          strlit.error(error)
++    if page_errors:
++      with strlit.expander(f"เธซเธเนเธฒเธ—เธตเนเธเธงเธฃเธ•เธฃเธงเธเธชเธญเธ ({len(page_errors)})"):
++        for page_number, error in page_errors:
++          strlit.error(f"เธซเธเนเธฒ {page_number}: {error}")
++          failed_image = failed_images.get(page_number)
++          if failed_image is not None:
++            strlit.download_button(
++                f"เธ”เธฒเธงเธเนเนเธซเธฅเธ”เธ เธฒเธเธซเธเนเธฒ {page_number}",
++                data=failed_image,
++                file_name=f"{stem}-page-{page_number}-failed.png",
++                mime="image/png",
++                key=f"failed-{page_number}",
++            )
++  except Exception as exc:
++    progress.progress(1.0, text="OCR เนเธกเนเธชเธณเน€เธฃเนเธ (100%)")
++    strlit.session_state.pop("ocr_text", None)
++    strlit.session_state.pop("ocr_result_fingerprint", None)
++    strlit.session_state["ocr_status"] = "failed"
++    strlit.error(f"เธญเนเธฒเธเน€เธญเธเธชเธฒเธฃเนเธกเนเธชเธณเน€เธฃเนเธ: {type(exc).__name__}: {exc}")
+\ No newline at end of file

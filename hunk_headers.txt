@@ -1,0 +1,12 @@
+﻿
+@@ -1,10 +1,11 @@
+@@ -13,12 +14,11 @@ import unicodedata
+@@ -29,487 +29,547 @@ GEMINI_MAX_WORKERS = 3
+@@ -519,80 +579,89 @@ def _extract_page_text_once(
+@@ -607,133 +676,162 @@ def extract_pdf(
+@@ -775,26 +873,27 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = 720) -> Non
+@@ -830,7 +929,6 @@ def inject_css() -> None:
+@@ -869,20 +967,25 @@ def inject_css() -> None:
+@@ -891,268 +994,377 @@ st.markdown(
+
+

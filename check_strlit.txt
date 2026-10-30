@@ -1,0 +1,92 @@
+﻿
+app.py:19:import streamlit as strlit
+app.py:829:    strlit.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
+app.py:877:  strlit.download_button(
+app.py:888:  strlit.markdown(
+app.py:974:strlit.set_page_config(
+app.py:979:strlit.markdown(
+app.py:984:strlit.markdown(
+app.py:988:strlit.markdown(
+app.py:997:with strlit.sidebar:
+app.py:998:  strlit.header("ตั้งค่าการอ่านเอกสาร")
+app.py:999:  strlit.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
+app.py:1002:  engine = strlit.radio(
+app.py:1014:    strlit.info("ไม่มี Typhoon API key — ระบบใช้ Tesseract อัตโนมัติ")
+app.py:1015:  language = strlit.selectbox(
+app.py:1025:  mode = strlit.selectbox(
+app.py:1035:    psm = strlit.selectbox(
+app.py:1054:    strlit.session_state["use_gemini_correction"] = False
+app.py:1055:  strlit.caption("ขั้นที่ 2: เลือกให้ Gemini ตรวจแก้ข้อความไทยหลังอ่านเอกสาร")
+app.py:1056:  use_gemini_correction = strlit.checkbox(
+app.py:1076:        show_advanced_models = strlit.checkbox(
+app.py:1091:          strlit.warning("ไม่พบรุ่นที่แนะนำ จะแสดงโมเดลทั้งหมดแทน")
+app.py:1099:        gemini_model = strlit.selectbox(
+app.py:1112:        strlit.markdown("**รุ่นที่เลือก**")
+app.py:1113:        strlit.caption(str(selected_metadata["description"]))
+app.py:1114:        strlit.caption(f"ประเภท: {gemini_model_kind(gemini_model)}")
+app.py:1115:        strlit.caption(
+app.py:1122:        strlit.markdown("**คะแนนโดยประมาณสำหรับงานตรวจแก้ OCR**")
+app.py:1123:        strlit.markdown(
+app.py:1131:        strlit.markdown(
+app.py:1139:        strlit.markdown(
+app.py:1149:        strlit.markdown(
+app.py:1160:        strlit.info(f"เหมาะกับ: {profile['best_for']}")
+app.py:1161:        strlit.caption(
+app.py:1165:        strlit.caption(
+app.py:1169:        strlit.caption(
+app.py:1174:        strlit.error("ไม่พบ Gemini model ที่รองรับ generateContent")
+app.py:1176:      strlit.error(f"ตรวจสอบ Gemini model ไม่สำเร็จ: {exc}")
+app.py:1177:      gemini_model = strlit.text_input("ชื่อ Gemini model สำรอง", value=GEMINI_MODEL)
+app.py:1180:      strlit.success("พร้อมใช้ Typhoon OCR")
+app.py:1181:      strlit.caption("ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
+app.py:1183:      strlit.warning(
+app.py:1188:    strlit.success("พร้อมใช้ Tesseract ในเครื่อง")
+app.py:1190:    strlit.error("ไม่พบ Tesseract")
+app.py:1192:    strlit.warning(
+app.py:1197:    strlit.info(
+app.py:1201:  strlit.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
+app.py:1203:strlit.markdown('<div class="ocr-card">', unsafe_allow_html=True)
+app.py:1204:uploaded = strlit.file_uploader(
+app.py:1214:previous_fingerprint = strlit.session_state.get("ocr_file_fingerprint", "")
+app.py:1220:  strlit.session_state.pop("ocr_text", None)
+app.py:1221:  strlit.session_state.pop("ocr_status", None)
+app.py:1222:  strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+app.py:1224:  strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+app.py:1226:  strlit.success(
+app.py:1229:  if uploaded_fingerprint != strlit.session_state.get("ocr_result_fingerprint"):
+app.py:1230:    strlit.info(
+app.py:1234:  strlit.info("เลือกไฟล์ PDF เพื่อเริ่มต้น")
+app.py:1236:  strlit.info(
+app.py:1241:  strlit.info("ความเป็นส่วนตัว: ภาพแต่ละหน้าจะถูกส่งไปยัง Typhoon OCR API")
+app.py:1242:run = strlit.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
+app.py:1243:strlit.markdown("</div>", unsafe_allow_html=True)
+app.py:1247:  strlit.markdown("### ตรวจเทียบ PDF กับข้อความ OCR")
+app.py:1248:  col_pdf, col_ocr = strlit.columns(2)
+app.py:1251:    strlit.markdown("**PDF ต้นฉบับ**")
+app.py:1255:    strlit.markdown("**ผลลัพธ์ข้อความ OCR**")
+app.py:1256:    current_result = strlit.session_state.get("ocr_text", "")
+app.py:1257:    result_fingerprint = strlit.session_state.get("ocr_result_fingerprint")
+app.py:1262:    comparison_text = strlit.empty()
+app.py:1273:    strlit.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
+app.py:1274:    strlit.stop()
+app.py:1275:  progress = strlit.progress(0, text="กำลังเตรียมไฟล์... (0%)")
+app.py:1277:      comparison_text if comparison_text is not None else strlit.empty()
+app.py:1308:    strlit.session_state["ocr_text"] = text
+app.py:1309:    strlit.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
+app.py:1327:      strlit.warning(
+app.py:1332:      strlit.warning(f"อ่านเอกสารเสร็จแล้ว แต่มี {len(page_errors)} หน้าที่ควรตรวจสอบ")
+app.py:1335:      strlit.success("อ่านเอกสารและตรวจแก้ด้วย Gemini สำเร็จ")
+app.py:1338:      strlit.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง")
+app.py:1339:    strlit.session_state["ocr_status"] = result_status
+app.py:1341:    strlit.download_button(
+app.py:1349:      with strlit.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
+app.py:1351:          strlit.error(error)
+app.py:1353:      with strlit.expander(f"หน้าที่ควรตรวจสอบ ({len(page_errors)})"):
+app.py:1355:          strlit.error(f"หน้า {page_number}: {error}")
+app.py:1358:            strlit.download_button(
+app.py:1367:    strlit.session_state.pop("ocr_text", None)
+app.py:1368:    strlit.session_state.pop("ocr_result_fingerprint", None)
+app.py:1369:    strlit.session_state["ocr_status"] = "failed"
+app.py:1370:    strlit.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")
+
+
