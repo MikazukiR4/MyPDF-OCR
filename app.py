@@ -26,6 +26,7 @@ load_dotenv(".env.typhoon", override=False)
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_PAGES = 100
 GEMINI_MAX_WORKERS = 3
+MAX_FAILED_IMAGE_ENTRIES = 20
 TESSDATA_DIR = Path(__file__).resolve().parent / "tessdata"
 
 OEM_LSTM_ONLY = "1"
@@ -36,6 +37,28 @@ TYPHOON_BASE_URL = os.getenv(
 ).rstrip("/")
 TYPHOON_MODEL = os.getenv("TYPHOON_MODEL", "typhoon-ocr")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+
+def _failed_image_dir(fingerprint: str) -> Path:
+  directory = Path(tempfile.gettempdir()) / "myocr_failed" / (fingerprint[:16] or "no-fingerprint")
+  directory.mkdir(parents=True, exist_ok=True)
+  return directory
+
+
+def _save_failed_image(fingerprint: str, page_number: int, image_bytes: bytes) -> Path:
+  path = _failed_image_dir(fingerprint) / f"page-{page_number}.png"
+  path.write_bytes(image_bytes)
+  return path
+
+
+def _prune_failed_dir(fingerprint: str) -> None:
+  directory = Path(tempfile.gettempdir()) / "myocr_failed" / (fingerprint[:16] or "no-fingerprint")
+  try:
+    for item in directory.glob("page-*.png"):
+      item.unlink()
+    directory.rmdir()
+  except OSError:
+    pass
 
 
 def render_page(document: object, page_number: int, mode: str = "best") -> bytes:
@@ -661,7 +684,26 @@ class TesseractWorker:
     )
 
   def terminate(self) -> None:
+    if self.closed:
+      return
     self.closed = True
+    proc = getattr(self, "proc", None)
+    if proc is not None:
+      try:
+        proc.terminate()
+        proc.wait(timeout=5)
+      except Exception:
+        pass
+
+  def __del__(self) -> None:
+    self.terminate()
+
+  def __enter__(self) -> "TesseractWorker":
+    return self
+
+  def __exit__(self, exc_type, exc, tb) -> bool:
+    self.terminate()
+    return False
 
 
 def extract_pdf(
@@ -675,7 +717,8 @@ def extract_pdf(
     gemini_model: str,
     progress: object,
     page_callback: object | None = None,
-) -> tuple[str, list[tuple[int | None, str]], dict[int, bytes]]:
+    fingerprint: str = "",
+) -> tuple[str, list[tuple[int | None, str]], dict[int, Path]]:
   try:
     import pymupdf as fitz
   except ImportError:
@@ -695,7 +738,7 @@ def extract_pdf(
 
     output: list[str] = []
     errors: list[tuple[int | None, str]] = []
-    failed_images: dict[int, bytes] = {}
+    failed_images: dict[int, Path] = {}
     worker = None if engine == "typhoon" else TesseractWorker(language, mode, psm, oem)
     gemini_document_mode = use_gemini_correction and len(pdf_bytes) <= MAX_FILE_BYTES
 
@@ -711,7 +754,7 @@ def extract_pdf(
       )
       for batch_start in range(1, page_count + 1, batch_size):
         batch_end = min(page_count, batch_start + batch_size - 1)
-        page_data: dict[int, tuple[str, str, bytes | None]] = {}
+        page_data: dict[int, tuple[str, str]] = {}
         gemini_jobs: dict[int, tuple[bytes, str]] = {}
         for page_number in range(batch_start, batch_end + 1):
           ratio = (page_number - 1) / page_count
@@ -727,7 +770,7 @@ def extract_pdf(
                 if use_gemini_correction and not gemini_document_mode
                 else None
             )
-            page_data[page_number] = (text, "embedded PDF text", image_bytes)
+            page_data[page_number] = (text, "embedded PDF text")
             if image_bytes is not None and not gemini_document_mode:
               gemini_jobs[page_number] = (image_bytes, text)
             continue
@@ -743,7 +786,7 @@ def extract_pdf(
                 or embedded_pdf_text(document[page_number - 1])
                 or "[ไม่พบข้อความ]"
             )
-            page_data[page_number] = (text, engine, image_bytes)
+            page_data[page_number] = (text, engine)
             if (
                 use_gemini_correction
                 and not gemini_document_mode
@@ -754,10 +797,17 @@ def extract_pdf(
           except Exception as exc:
             fallback = embedded_pdf_text(document[page_number - 1])
             if fallback:
-              page_data[page_number] = (fallback, "embedded PDF text", image_bytes)
+              page_data[page_number] = (fallback, "embedded PDF text")
             else:
               errors.append((page_number, f"{type(exc).__name__}: {exc}"))
-              failed_images[page_number] = image_bytes
+              if len(failed_images) >= MAX_FAILED_IMAGE_ENTRIES:
+                oldest = min(failed_images)
+                stale_path = failed_images.pop(oldest)
+                try:
+                  stale_path.unlink()
+                except OSError:
+                  pass
+              failed_images[page_number] = _save_failed_image(fingerprint, page_number, image_bytes)
 
         futures = {}
         if gemini_jobs:
@@ -772,7 +822,7 @@ def extract_pdf(
               if page_number not in page_data:
                 output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
               else:
-                text, method, _ = page_data[page_number]
+                text, method = page_data[page_number]
                 if page_number in futures:
                   try:
                     text = futures[page_number].result()
@@ -793,7 +843,7 @@ def extract_pdf(
             if page_number not in page_data:
               output.append(f"----- หน้า {page_number} -----\n[อ่านหน้านี้ไม่สำเร็จ]")
             else:
-              text, method, _ = page_data[page_number]
+              text, method = page_data[page_number]
               output.append(f"----- หน้า {page_number} | {method} -----\n{text}")
             progress.progress(
                 0.5 + (page_number / page_count) * 0.5,
@@ -1222,6 +1272,9 @@ if (
   strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 elif uploaded_fingerprint and not previous_fingerprint:
   strlit.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+for stale_key in [k for k in strlit.session_state if str(k).startswith("failed-")]:
+  strlit.session_state.pop(stale_key, None)
+_prune_failed_dir(previous_fingerprint)
 if uploaded is not None:
   strlit.success(
       f"เลือกไฟล์แล้ว: {uploaded.name} · {uploaded.size / 1024:.1f} KB"
@@ -1303,6 +1356,7 @@ if run:
         gemini_model,
         progress,
         publish_live_text,
+        fingerprint=uploaded_fingerprint,
     )
     progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
     strlit.session_state["ocr_text"] = text
@@ -1354,17 +1408,20 @@ if run:
         for page_number, error in page_errors:
           strlit.error(f"หน้า {page_number}: {error}")
           failed_image = failed_images.get(page_number)
-          if failed_image is not None:
+          if failed_image is not None and failed_image.exists():
             strlit.download_button(
                 f"ดาวน์โหลดภาพหน้า {page_number}",
-                data=failed_image,
+                data=failed_image.read_bytes(),
                 file_name=f"{stem}-page-{page_number}-failed.png",
                 mime="image/png",
-                key=f"failed-{page_number}",
+                key=f"failed-{uploaded_fingerprint}-{page_number}",
             )
   except Exception as exc:
     progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
     strlit.session_state.pop("ocr_text", None)
     strlit.session_state.pop("ocr_result_fingerprint", None)
+    for stale_key in [k for k in strlit.session_state if str(k).startswith("failed-")]:
+      strlit.session_state.pop(stale_key, None)
+    _prune_failed_dir(uploaded_fingerprint)
     strlit.session_state["ocr_status"] = "failed"
     strlit.error(f"อ่านเอกสารไม่สำเร็จ: {type(exc).__name__}: {exc}")

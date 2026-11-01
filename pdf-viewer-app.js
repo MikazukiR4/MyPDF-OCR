@@ -546,7 +546,7 @@
   scrim.addEventListener("click", closeToc);
 
   /* ---------- Clearing ---------- */
-  function clearAll(){
+  function disposeViewer(){
     docSeq++;
     syncQueryName("");
     if (loadingTask){ try{ loadingTask.destroy(); }catch(e){} loadingTask = null; }
@@ -557,9 +557,11 @@
       if (rec.task){ try{ rec.task.cancel(); }catch(e){} }
       if (rec.textTask && rec.textTask.cancel){ try{ rec.textTask.cancel(); }catch(e){} }
       if (rec.canvas){ rec.canvas.width = 0; rec.canvas.height = 0; }
+      if (rec.textLayer){ rec.textLayer.textContent = ""; }
+      if (rec.div){ rec.div.__rec = null; }
     }
     pages = [];
-    if (pdfDoc){ try{ pdfDoc.destroy(); }catch(e){} pdfDoc = null; }
+    if (pdfDoc){ try{ pdfDoc.cleanup(); }catch(e){} try{ pdfDoc.destroy(); }catch(e){} pdfDoc = null; }
     numPages = 0; currentPage = 1; zoomMode = "fit";
     viewer.textContent = "";
     viewer.hidden = true;
@@ -569,11 +571,18 @@
     closeToc();
     setTitle("");
     clearTimeout(headerTimer);
+    clearTimeout(toastTimer);
+    clearTimeout(resizeTimer);
+    cancelHandoff();
     lastScrollY = 0;
+    hdrTicking = false;
     body.classList.remove("viewing", "hdr-hidden", "loading");
     applyZoomLabel();
   }
 
+  function clearAll(){
+    disposeViewer();   // wrapper kept: call sites 115/149/268 unchanged
+  }
   /* ---------- Controls ---------- */
   function openDialog(){ fileInput.click(); }
 
@@ -583,7 +592,7 @@
     fileInput.value = "";
   });
 
-  doc.getElementById("btnClear").addEventListener("click", clearAll);
+  doc.getElementById("btnClear").addEventListener("click", disposeViewer);
   doc.getElementById("btnFooterClose").addEventListener("click", function(){
     doc.getElementById("footer").hidden = true;
   });
@@ -963,6 +972,7 @@
     if (FAMILY_ORIGINS.indexOf(e.origin) === -1) return;      // family origins only
     var d = e.data;
     if (d && d.type === "fv-file" && d.file instanceof File){ // clone re-creates a real File in this realm
+      selfCleanIfFrame();   // C3: release previous doc before new hand-off
       readFile(d.file);
       e.source.postMessage({ type:"fv-ack" }, e.origin);      // ack = received and handed to the loader
     }
@@ -1004,4 +1014,9 @@
 
 
   if (!pdfjsLib) toast("Viewer failed to load its PDF engine");
+  // C3: components.html re-renders replace this iframe from outside, so pagehide
+  // may never fire; the receiver listener below is the primary self-clean path.
+  function selfCleanIfFrame(){ if (window.parent !== window) disposeViewer(); }
+  window.addEventListener("pagehide", function(){ disposeViewer(); });
+  window.addEventListener("beforeunload", function(){ disposeViewer(); });
 })();
