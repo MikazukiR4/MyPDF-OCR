@@ -45,7 +45,7 @@
       var wsrc = doc.getElementById("pdfWorker");
       if (wsrc && wsrc.textContent){
         var wblob = new Blob([wsrc.textContent], { type: "text/javascript" });
-        pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(wblob);
+        pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl = URL.createObjectURL(wblob);
       }
     }catch(e){}
   }
@@ -61,6 +61,7 @@
   var io = null;          // lazy-render observer
   var visIo = null;       // current-page observer
   var resizeTimer = null;
+  var workerUrl = null;     // blob URL of the pdf.js worker (revoked on teardown)
 
   function toast(msg){
     toastEl.textContent = msg;
@@ -548,6 +549,7 @@
   /* ---------- Clearing ---------- */
   function clearAll(){
     docSeq++;
+    clearTimeout(resizeTimer); resizeTimer = null;
     syncQueryName("");
     if (loadingTask){ try{ loadingTask.destroy(); }catch(e){} loadingTask = null; }
     if (io) io.disconnect();
@@ -1004,4 +1006,10 @@
 
 
   if (!pdfjsLib) toast("Viewer failed to load its PDF engine");
+
+  // Free the worker blob URL when the document is going away; the worker script
+  // source otherwise stays alive for the lifetime of the tab.
+  window.addEventListener("pagehide", function(){
+    if (workerUrl){ try{ URL.revokeObjectURL(workerUrl); }catch(e){} workerUrl = null; }
+  });
 })();

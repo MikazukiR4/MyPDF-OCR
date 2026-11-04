@@ -75,7 +75,7 @@ def render_page(document: object, page_number: int, mode: str = "best") -> bytes
     return pixmap.tobytes("png")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=8, ttl=1800)
 def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
     try:
         import pymupdf as fitz
@@ -136,7 +136,7 @@ def export_pdf_visual_docx(pdf_bytes: bytes) -> bytes:
         pdf_document.close()
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=8, ttl=1800)
 def export_pdf_editable_docx(
     pdf_bytes: bytes,
     ocr_text: str = "",
@@ -154,7 +154,7 @@ def export_pdf_editable_docx(
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=32, ttl=1800)
 def export_pdf_flowing_docx(ocr_text: str = "") -> bytes:
     from docx_generator import create_flowing_docx
 
@@ -833,12 +833,19 @@ def extract_pdf(
         document.close()
 
 
+@st.cache_data(show_spinner=False, max_entries=8, ttl=1800)
+def _encode_pdf_b64(pdf_bytes: bytes) -> bytes:
+    """Cache base64 of the PDF keyed by its bytes, so each rerun reuses the string
+    instead of re-encoding a ~1.33x copy of the PDF."""
+    return base64.b64encode(pdf_bytes)
+
+
 def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_HEIGHT) -> None:
     if not pdf_bytes:
         st.error("ไม่พบข้อมูล PDF สำหรับแสดงตัวอย่าง")
         return
     display_name = filename or "document.pdf"
-    encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+    encoded_pdf = _encode_pdf_b64(pdf_bytes).decode("ascii")
     safe_name = json.dumps(display_name, ensure_ascii=False)
     viewer_html = f"""
     <!doctype html>
@@ -882,7 +889,9 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
             const binary = atob(payload.data);
             const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
             const blob = new Blob([bytes], {{type:"application/pdf"}});
+            if (window.__pdfViewerUrl) {{ URL.revokeObjectURL(window.__pdfViewerUrl); }}
             const pdfUrl = URL.createObjectURL(blob);
+            window.__pdfViewerUrl = pdfUrl;
             EmbedPDF.init({{
               type: "container",
               target,
@@ -1256,6 +1265,8 @@ if run:
 
     try:
         page_cache = st.session_state.setdefault("ocr_page_cache", {})
+        if len(page_cache) > 200:
+            page_cache.clear()
         text, errors, failed_images = extract_pdf(
             uploaded_bytes, language, mode, psm, oem, effective_engine,
             effective_use_gemini, gemini_model, progress,
@@ -1310,6 +1321,7 @@ if run:
                             mime="image/png",
                             key=f"failed-{page_number}",
                         )
+        failed_images.clear()
     except Exception as exc:
         progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.session_state["ocr_text"] = ""
