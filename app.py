@@ -2021,10 +2021,14 @@ if run:
             st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง (0 Token)")
         st.session_state["ocr_status"] = result_status
         
-        # --- Phase 2: Calculate and display stats banner ---
+        # --- Phase 3: Calculate and display stats banner with confidence + language ---
         _ocr_stats = calculate_ocr_stats(st.session_state["ocr_result_editor"])
         if _ocr_stats["pages"] > 0:
-            ocr_preview.markdown(format_stats_banner(_ocr_stats), unsafe_allow_html=True)
+            _ocr_confidence = _calculate_ocr_confidence(st.session_state["ocr_result_editor"])
+            _ocr_lang = _detect_language(st.session_state["ocr_result_editor"])
+            st.session_state["_last_ocr_confidence"] = _ocr_confidence
+            st.session_state["_last_ocr_language"] = _ocr_lang
+            ocr_preview.markdown(format_stats_banner(_ocr_stats, _ocr_confidence, _ocr_lang), unsafe_allow_html=True)
         
         stem = Path(uploaded.name).stem
         if document_errors:
