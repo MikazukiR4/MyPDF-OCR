@@ -1265,6 +1265,8 @@ def inject_css() -> None:
         .small-note { color:#94a3b8; font-size:13px; }
         .pdf-empty { height:var(--panel-height); box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:2rem; border:1px dashed #64748b; border-radius:12px; background:#020617; color:#94a3b8; text-align:center; line-height:1.7; }
         .ocr-live-preview { height:var(--panel-height); box-sizing:border-box; padding:16px; border:2px solid #64748b; border-radius:10px; background:#020617; color:#ffffff; font:16px/1.7 "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:hidden; overflow-y:auto; }
+        /* Phase 3: Balance PDF viewer and OCR editor heights */
+        div[data-testid="stTextArea"] textarea { min-height:var(--panel-height) !important; height:var(--panel-height) !important; }
         div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
         [data-baseweb="select"], [data-baseweb="select"] > div { background:#0f172a !important; border-color:#475569 !important; color:#f8fafc !important; }
         [data-baseweb="select"] * { color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; }
@@ -1794,7 +1796,7 @@ if uploaded is not None and total_doc_pages > 0:
                     st.caption(f"จะประมวลผลทั้งหมด {len(target_pages_to_process)} หน้า")
             else:
                 target_pages_to_process = list(range(1, total_doc_pages + 1))
-                st.success(f"✅ จะประมวลผลครบทั้ง {total_doc_pages} หน้า")
+                st.caption(f"📄 จะประมวลผลครบทั้ง {total_doc_pages} หน้า")
         else:
             st.warning("ยังไม่มีเอกสาร — กรุณาอัปโหลดไฟล์ PDF ก่อนเลือกหน้า")
             target_pages_to_process = []
@@ -1987,10 +1989,11 @@ if run:
         st.session_state["ocr_result_fingerprint"] = uploaded_fingerprint
         st.session_state["target_pages_processed"] = target_pages_to_process
         
+        ocr_preview.container(height=OCR_EDITOR_HEIGHT, border=False)
         ocr_preview.text_area(
             "ผล OCR",
             value=st.session_state["ocr_result_editor"],
-            height=OCR_EDITOR_HEIGHT,
+            height=OCR_EDITOR_HEIGHT - 40,
             key="ocr_result_editor"
         )
         
