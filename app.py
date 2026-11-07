@@ -1,4 +1,4 @@
-import io
+﻿import io
 import html
 import hashlib
 import csv
@@ -38,6 +38,32 @@ if 'pdf_bytes' not in st.session_state:
      st.session_state['pdf_bytes'] = None
 if 'ocr_result_editor' not in st.session_state:
     st.session_state['ocr_result_editor'] = ""
+# Undo/Redo stacks for OCR result editor (preserved across reruns)
+if 'ocr_undo_stack' not in st.session_state:
+    st.session_state['ocr_undo_stack'] = []
+if 'ocr_redo_stack' not in st.session_state:
+    st.session_state['ocr_redo_stack'] = []
+# Track original text for stats calculation
+if 'ocr_original_text' not in st.session_state:
+    st.session_state['ocr_original_text'] = ""
+
+# --- Phase 3: Batch Processing State ---
+if 'batch_mode' not in st.session_state:
+    st.session_state['batch_mode'] = False
+if 'uploaded_files' not in st.session_state:
+    st.session_state['uploaded_files'] = []
+if 'batch_results' not in st.session_state:
+    st.session_state['batch_results'] = {}
+if 'batch_processing_status' not in st.session_state:
+    st.session_state['batch_processing_status'] = {}
+if 'active_batch_tab' not in st.session_state:
+    st.session_state['active_batch_tab'] = 0
+# --- Phase 3: Theme Toggle State ---
+if 'theme_mode' not in st.session_state:
+    st.session_state['theme_mode'] = "dark"
+# --- Phase 3: Language Detection State ---
+if 'detected_language' not in st.session_state:
+    st.session_state['detected_language'] = None
 # ---------------------------------
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -160,6 +186,236 @@ def export_pdf_flowing_docx(ocr_text: str = "") -> bytes:
 
     return create_flowing_docx(ocr_text)
 
+
+# --- Phase 2: Multi-format Export Helpers ---
+
+@st.cache_data(show_spinner=False, max_entries=32, ttl=1800)
+def export_txt_file(ocr_text: str = "") -> bytes:
+    """Export OCR text as plain text."""
+    output = io.BytesIO()
+    output.write(ocr_text.encode("utf-8"))
+    return output.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=32, ttl=1800)
+def export_html_file(ocr_text: str = "", title: str = "MyOCR PDF Result") -> bytes:
+    """Export OCR text as formatted HTML."""
+    escaped_text = html.escape(ocr_text)
+    html_content = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>{html.escape(title)}</title>
+<style>
+  body {{ font-family: 'Segoe UI', 'Noto Sans Thai', sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.8; color: #1a1a1a; }}
+  h1 {{ color: #172554; border-bottom: 2px solid #dc2626; padding-bottom: 10px; }}
+</style>
+</head>
+<body>
+<h1>{html.escape(title)}</h1>
+<pre style="white-space: pre-wrap; word-wrap: break-word;">{escaped_text}</pre>
+</body>
+</html>"""
+    output = io.BytesIO()
+    output.write(html_content.encode("utf-8"))
+    return output.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=32, ttl=1800)
+def export_markdown_file(ocr_text: str = "", title: str = "MyOCR PDF Result") -> bytes:
+    """Export OCR text as Markdown."""
+    md_content = f"# {title}\n\n---\n\n{ocr_text}\n\n---\n*สร้างโดย MyOCR PDF*\n"
+    output = io.BytesIO()
+    output.write(md_content.encode("utf-8"))
+    return output.getvalue()
+
+
+def calculate_ocr_stats(text: str) -> dict:
+    """Calculate statistics about OCR text."""
+    if not text:
+        return {"pages": 0, "characters": 0, "words": 0, "lines": 0}
+    
+    # Count pages by markers
+    page_pattern = re.findall(r'----- หน้า \d+', text)
+    pages = len(page_pattern) + 1 if page_pattern else (1 if text.strip() else 0)
+    
+    # Count characters (all chars including spaces)
+    characters = len(text)
+    
+    # Count words (split by whitespace, handles Thai and English)
+    words = len(text.split())
+    
+    # Count lines
+    lines = text.count('\n') + 1
+    
+    return {
+        "pages": pages,
+        "characters": characters,
+        "words": words,
+        "lines": lines,
+    }
+
+
+def _calculate_ocr_confidence(text: str) -> dict:
+    """Calculate OCR confidence score for a text block (0-100%)."""
+    if not text or not text.strip():
+        return {"overall": 0.0, "per_page": [], "badge": ""}
+    
+    # Split text into per-page segments by markers
+    page_texts = {}
+    lines = text.split('\n')
+    current_page = "1"
+    current_lines = []
+    
+    for line in lines:
+        marker_match = re.match(r"^----- หน้า (\d+)(?: \| .*?)? ----$", line.strip())
+        if marker_match:
+            if current_lines:
+                page_texts[current_page] = '\n'.join(current_lines)
+            current_page = marker_match.group(1)
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    
+    if current_lines:
+        page_texts[current_page] = '\n'.join(current_lines)
+    
+    if not page_texts:
+        page_texts["1"] = text
+    
+    def _score_single_page(page_text: str) -> float:
+        if not page_text or not page_text.strip():
+            return 0.0
+        score = 0.0
+        
+        # Factor 1: Thai character ratio (30 pts)
+        thai_chars = sum(1 for c in page_text if '\u0e00' <= c <= '\u0e7f')
+        total_alpha = sum(1 for c in page_text if c.isalpha() or ('\u0e00' <= c <= '\u0e7f'))
+        if total_alpha > 0:
+            score += min(30, (thai_chars / total_alpha) * 30)
+        elif thai_chars > 5:
+            score += 30
+        
+        # Factor 2: Text length (25 pts)
+        clean = page_text.strip()
+        if len(clean) > 100:
+            score += 25
+        elif len(clean) > 50:
+            score += 20
+        elif len(clean) > 20:
+            score += 15
+        else:
+            score += 5
+        
+        # Factor 3: No error markers (25 pts)
+        if not any(m in page_text for m in ['[อ่านหน้านี้ไม่สำเร็จ]', '[Error]', '[error]']):
+            score += 25
+        
+        # Factor 4: Line structure (20 pts)
+        text_lines = [l for l in page_text.split('\n') if l.strip()]
+        if len(text_lines) > 2:
+            avg_len = sum(len(l) for l in text_lines) / len(text_lines)
+            score += 20 if 10 <= avg_len <= 100 else (15 if 5 <= avg_len <= 200 else 5)
+        else:
+            score += 10
+        
+        return min(100, max(0, score))
+    
+    per_page_scores = []
+    total_score = 0.0
+    
+    for page_num in sorted(page_texts.keys(), key=lambda x: int(x) if x.isdigit() else 0):
+        score = _score_single_page(page_texts[page_num])
+        per_page_scores.append({
+            "page_number": int(page_num) if page_num.isdigit() else 0,
+            "score": round(score, 1)
+        })
+        total_score += score
+    
+    overall = round(total_score / len(per_page_scores), 1) if per_page_scores else 0.0
+    
+    if overall >= 85:
+        color, emoji = "#22c55e", "🟢"
+    elif overall >= 60:
+        color, emoji = "#eab308", "🟡"
+    else:
+        color, emoji = "#ef4444", "🔴"
+    
+    badge = f'<span style="background:{color}20;border:1px solid {color};color:{color};padding:4px 12px;border-radius:999px;font-size:13px;font-weight:600;">{emoji} ความแม่นยำ OCR: {overall}%</span>'
+    
+    return {"overall": overall, "per_page": per_page_scores, "badge": badge, "color": color, "emoji": emoji}
+
+
+def _detect_language(text: str) -> str:
+    """Auto-detect the primary language of OCR text."""
+    if not text or not text.strip():
+        return "unknown"
+    
+    try:
+        from langdetect import detect, LangDetectException
+        
+        clean_text = re.sub(r'----- หน้า \d+(?: \| [^-]+)? -----\n?', ' ', text)
+        clean_text = re.sub(r'\[.*?\]', '', clean_text)
+        clean_text = clean_text.strip()
+        
+        if len(clean_text) < 10:
+            return "unknown"
+        
+        try:
+            lang = detect(clean_text)
+            if lang == "th":
+                return "th"
+            elif lang == "en":
+                return "en"
+            else:
+                thai_ratio = sum(1 for c in clean_text if '\u0e00' <= c <= '\u0e7f') / max(1, len(clean_text))
+                if thai_ratio > 0.1 and thai_ratio < 0.9:
+                    return "mixed"
+                return lang if lang else "unknown"
+        except LangDetectException:
+            thai_chars = sum(1 for c in clean_text if '\u0e00' <= c <= '\u0e7f')
+            eng_chars = sum(1 for c in clean_text if 'a' <= c.lower() <= 'z')
+            total = max(1, thai_chars + eng_chars)
+            if thai_chars / total > 0.6:
+                return "th"
+            elif eng_chars / total > 0.6:
+                return "en"
+            else:
+                return "mixed"
+    except ImportError:
+        thai_chars = sum(1 for c in text if '\u0e00' <= c <= '\u0e7f')
+        eng_chars = sum(1 for c in text if 'a' <= c.lower() <= 'z')
+        total = max(1, thai_chars + eng_chars)
+        if thai_chars / total > 0.6:
+            return "th"
+        elif eng_chars / total > 0.6:
+            return "en"
+        else:
+            return "mixed"
+
+
+def format_stats_banner(stats: dict, confidence: dict = None, detected_lang: str = None) -> str:
+    """Format stats into a styled HTML banner with optional confidence and language info."""
+    if stats["pages"] == 0:
+        return ""
+    
+    extra_info = ""
+    if confidence:
+        extra_info += f'<span style="margin-right:16px;">{confidence["badge"]}</span>'
+    if detected_lang:
+        lang_labels = {"th": "🇹🇭 ไทย", "en": "🇬🇧 English", "mixed": "🇹🇭🇬🇧 ผสม", "unknown": "❓ ไม่ทราบ"}
+        lang_label = lang_labels.get(detected_lang, detected_lang)
+        extra_info += f'<span style="color:#cbd5e1;font-size:14px;">{lang_label}</span>'
+    
+    return f"""
+<div style="background:#1e293b;border:1px solid #475569;border-radius:10px;padding:12px 16px;margin:12px 0;display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+    <span style="color:#94a3b8;font-size:14px;">Stat สรุปผล OCR</span>
+    {extra_info}
+    <span style="background:#dc2626;color:#fff;padding:3px 10px;border-radius:999px;font-size:13px;font-weight:700;">{stats['pages']} หน้า</span>
+    <span style="color:#cbd5e1;font-size:14px;">{stats['characters']:,} ตัวอักษร</span>
+    <span style="color:#cbd5e1;font-size:14px;">{stats['words']:,} คำ</span>
+    <span style="color:#cbd5e1;font-size:14px;">{stats['lines']:,} บรรทัด</span>
+</div>"""
 
 
 def preprocess_image(image_bytes: bytes, mode: str) -> bytes:
@@ -860,11 +1116,25 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
           #pdf-viewer {{ width:100%; height:100%; min-height:0; }}
           #zoom-controls {{ position:absolute; top:72px; right:12px; z-index:20; display:flex; align-items:center; gap:4px; padding:4px; border-radius:10px; background:rgba(15,23,42,.88); box-shadow:0 3px 12px rgba(0,0,0,.28); }}
           #viewer-error {{ padding:1rem; color:#fecaca; font:14px sans-serif; }}
+          /* Skeleton loader */
+          #skeleton-loader {{
+            position:absolute; top:0; left:0; width:100%; height:100%;
+            display:flex; align-items:center; justify-content:center;
+            background:#172554; z-index:10; flex-direction:column; gap:16px;
+          }}
+          .skeleton-spinner {{
+            width:48px; height:48px; border:4px solid rgba(148,163,184,.25);
+            border-top-color:#94a3b8; border-radius:50%;
+            animation:spin 1s linear infinite;
+          }}
+          @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+          .skeleton-text {{ color:#94a3b8; font-size:15px; font-family:sans-serif; }}
         </style>
       </head>
       <body>
         <div id="viewer-shell">
           <div id="pdf-viewer" aria-label="ตัวอย่าง PDF: {safe_name}"></div>
+          <div id="skeleton-loader"><div class="skeleton-spinner"></div><div class="skeleton-text">กำลังโหลด PDF viewer...</div></div>
         </div>
         <div id="viewer-error" role="alert" hidden></div>
         <script type="module">
@@ -898,7 +1168,14 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str, height: int = PDF_VIEWER_
               src: pdfUrl,
               theme: {{ preference: "system" }}
             }});
+            // Hide skeleton loader when PDF is ready
+            const skel = document.getElementById("skeleton-loader");
+            if (skel) {{
+              setTimeout(() => {{ skel.style.transition = "opacity 0.3s"; skel.style.opacity = "0"; setTimeout(() => {{ skel.remove(); }}, 300); }}, 500);
+            }}
           }} catch (error) {{
+            const skel = document.getElementById("skeleton-loader");
+            if (skel) skel.remove();
             showError(`เปิดตัวอย่าง PDF ไม่สำเร็จ: ${{error.message}}`);
           }}
         </script>
@@ -919,28 +1196,49 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-        :root { --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#dc2626; --accent-dark:#991b1b; --navy:#172554; }
-        html, body, button, input, textarea, select { font-family:"Segoe UI", "Noto Sans Thai", Tahoma, sans-serif !important; }
-        .stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: var(--ink) !important; }
+        :root {
+            --ink: #f8fafc;
+            --muted: #94a3b8;
+            --line: #334155;
+            --accent: #dc2626;
+            --accent-dark: #991b1b;
+            --navy: #172554;
+        }
+        html, body, button, input, textarea, select {
+            font-family: "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif !important;
+        }
+        .stApp, [data-testid="stAppViewContainer"] {
+            background: #0b1220 !important;
+            color: var(--ink) !important;
+        }
         header[data-testid="stHeader"], [data-testid="stHeader"] { background: #0b1220 !important; height: 2.5rem !important; }
         [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] { background: transparent !important; }
-        .block-container { width:100%; max-width:none; padding:3.5rem clamp(1rem, 3vw, 3rem) 2rem; }
+        .block-container {
+            width:100%; max-width:none; padding:3.5rem clamp(1rem, 3vw, 3rem) 2rem;
+            color:#f8fafc !important;
+        }
         :root { --panel-height: min(78vh, 820px); }
         div[data-testid="stIFrame"], div[data-testid="stCustomComponentV1"] { height:var(--panel-height) !important; min-height:0 !important; }
         div[data-testid="stIFrame"] iframe, div[data-testid="stCustomComponentV1"] iframe { height:100% !important; min-height:0 !important; }
         .mypdf-header { display:flex; align-items:center; gap:12px; margin-bottom:2rem; }
         .mypdf-icon { background:var(--accent); color:#fff; border-radius:9px; padding:9px 12px; font-size:24px; box-shadow:0 4px 10px rgba(220,38,38,.2); }
-        .mypdf-name { font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.3px; }
+        .mypdf-name { font-size:30px; font-weight:800; color:#f8fafc !important; letter-spacing:-.3px; }
         .mypdf-name span { color:var(--accent); }
-        .ocr-card { background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:24px; box-shadow:0 5px 20px rgba(15,23,42,.06); }
+        .ocr-card {
+            background: #111827 !important;
+            border-color: #334155 !important;
+            box-shadow: 0 8px 24px rgba(0,0,0,.28) !important;
+            border-radius: 16px;
+            padding: 24px;
+        }
         .subtitle { color:var(--muted) !important; margin-top:-12px; margin-bottom:24px; font-size:15px; }
-        .workflow-steps { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:-8px 0 24px; color:#64748b; font-size:14px; }
-        .workflow-step { padding:6px 10px; border:1px solid #cbd5e1; border-radius:999px; background:#fff; }
-        .workflow-step.active { color:#991b1b; border-color:#fca5a5; background:#fef2f2; font-weight:700; }
-        div[data-testid="stFileUploader"] { background:#ffffff !important; border:2px dashed #94a3b8; border-radius:14px; padding:10px; }
-        div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#ffffff !important; color:#172033 !important; }
-        div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#334155 !important; }
-        div[data-testid="stProgressBar"] > div { background:#e2e8f0 !important; }
+        .workflow-steps { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:-8px 0 24px; color:#94a3b8; font-size:14px; }
+        .workflow-step { padding:6px 10px; border:1px solid #334155; border-radius:999px; background:#111827; color:#f8fafc; }
+        .workflow-step.active { color:#fca5a5 !important; border-color:#dc2626; background:rgba(220,38,38,.15) !important; font-weight:700; }
+        div[data-testid="stFileUploader"] { background:#111827 !important; border:2px dashed #64748b; border-radius:14px; padding:10px; }
+        div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#111827 !important; color:#f8fafc !important; }
+        div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#cbd5e1 !important; }
+        div[data-testid="stProgressBar"] > div { background:#1e293b !important; }
         div[data-testid="stButton"] > button { background:#dc2626 !important; color:#ffffff !important; border:1px solid #991b1b !important; border-radius:8px !important; font-weight:700 !important; }
         div[data-testid="stButton"] > button:hover { background:#b91c1c !important; color:#ffffff !important; border-color:#991b1b !important; }
         div[data-testid="stButton"] > button[kind="primary"], button[kind="primary"] { background:var(--accent) !important; color:#ffffff !important; border-color:var(--accent-dark) !important; box-shadow:0 4px 10px rgba(220,38,38,.18); }
@@ -949,50 +1247,43 @@ def inject_css() -> None:
         div[data-testid="stFileUploader"] button:hover { background:#475569 !important; color:#ffffff !important; }
         div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; font-weight:700 !important; min-height:44px !important; }
         div[data-testid="stDownloadButton"] > button:hover { background:#115e59 !important; color:#ffffff !important; }
-        div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#172033 !important; font-weight:700 !important; }
-        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; border-radius:10px !important; font-size:16px !important; line-height:1.7 !important; opacity:1 !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; }
-        div[data-testid="stTextArea"] textarea { height:var(--panel-height) !important; min-height:var(--panel-height) !important; max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; resize:none !important; box-sizing:border-box !important; }
+        div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#f8fafc !important; font-weight:700 !important; }
+        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; border-radius:10px !important; font-size:16px !important; line-height:1.7 !important; height:var(--panel-height) !important; min-height:var(--panel-height) !important; max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; resize:none !important; box-sizing:border-box !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; }
         div[data-testid="stCodeBlock"] pre { max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; }
-        div[data-testid="stTextArea"] textarea::placeholder { color:#64748b !important; opacity:1 !important; }
-        div[data-testid="stAlert"] { color:#172033 !important; border-radius:10px !important; }
-        div[data-testid="stAlert"] p { color:inherit !important; }
-        .stCaption, .stMarkdown, .stMarkdown p, label, label p { color:#334155 !important; }
-        aside[data-testid="stSidebar"] { background:var(--navy) !important; border-right:1px solid #1e3a8a !important; }
+        div[data-testid="stTextArea"] textarea::placeholder { color:#94a3b8 !important; opacity:1 !important; }
+        div[data-testid="stAlert"] { background:#172033 !important; color:#f8fafc !important; border-color:#475569 !important; border-radius:10px !important; }
+        div[data-testid="stAlert"] p { color:#f8fafc !important; }
+        .stCaption, .stMarkdown, .stMarkdown p, label, label p { color:#cbd5e1 !important; }
+        aside[data-testid="stSidebar"] { background:#111827 !important; border-right:1px solid #1e3a8a !important; }
         aside[data-testid="stSidebar"] * { color:#f8fafc !important; }
         aside[data-testid="stSidebar"] [data-testid="stWidgetLabel"] *, aside[data-testid="stSidebar"] [data-testid="stCaptionContainer"] *, aside[data-testid="stSidebar"] .stMarkdown * { color:#f8fafc !important; }
         aside[data-testid="stSidebar"] label, aside[data-testid="stSidebar"] p, aside[data-testid="stSidebar"] h1, aside[data-testid="stSidebar"] h2, aside[data-testid="stSidebar"] h3 { color:#f8fafc !important; }
-        aside[data-testid="stSidebar"] [data-baseweb="select"] { background:#ffffff !important; }
+        aside[data-testid="stSidebar"] [data-baseweb="select"] { background:#ffffff !important; min-width:100% !important; }
         aside[data-testid="stSidebar"] [data-baseweb="select"] * { color:#172033 !important; }
         aside[data-testid="stSidebar"] [data-baseweb="select"] input, aside[data-testid="stSidebar"] [data-baseweb="select"] [role="combobox"] { color:#172033 !important; -webkit-text-fill-color:#172033 !important; }
-        .small-note { color:#64748b; font-size:13px; }
+        aside[data-testid="stSidebar"] [data-baseweb="select"] > div { min-width:100% !important; }
+        .small-note { color:#94a3b8; font-size:13px; }
         .pdf-empty { height:var(--panel-height); box-sizing:border-box; display:flex; align-items:center; justify-content:center; padding:2rem; border:1px dashed #64748b; border-radius:12px; background:#020617; color:#94a3b8; text-align:center; line-height:1.7; }
         .ocr-live-preview { height:var(--panel-height); box-sizing:border-box; padding:16px; border:2px solid #64748b; border-radius:10px; background:#020617; color:#ffffff; font:16px/1.7 "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:hidden; overflow-y:auto; }
-        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] { background:#0b1220 !important; color:#f8fafc !important; }
-        .block-container { color:#f8fafc !important; }
-        .ocr-card { background:#111827 !important; border-color:#334155 !important; box-shadow:0 8px 24px rgba(0,0,0,.28) !important; }
-        .mypdf-name { color:#f8fafc !important; }
-        .subtitle, .small-note, .stCaption, .stMarkdown, .stMarkdown p, label, label p { color:#cbd5e1 !important; }
-        div[data-testid="stFileUploader"], div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#111827 !important; border-color:#64748b !important; color:#f8fafc !important; }
-        div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#cbd5e1 !important; }
-        div[data-testid="stTextArea"] textarea { background:#020617 !important; color:#ffffff !important; border:2px solid #64748b !important; -webkit-text-fill-color:#ffffff !important; caret-color:#ffffff !important; font-size:16px !important; line-height:1.7 !important; height:var(--panel-height) !important; min-height:var(--panel-height) !important; max-height:var(--panel-height) !important; overflow-x:hidden !important; overflow-y:auto !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; word-break:break-word !important; resize:none !important; }
-        div[data-testid="stTextArea"] label, div[data-testid="stTextArea"] label p { color:#f8fafc !important; }
-        div[data-testid="stAlert"] { background:#172033 !important; color:#f8fafc !important; border-color:#475569 !important; }
-        div[data-testid="stAlert"] p { color:#f8fafc !important; }
-        div[data-testid="stProgressBar"] > div { background:#1e293b !important; }
+        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
         [data-baseweb="select"], [data-baseweb="select"] > div { background:#0f172a !important; border-color:#475569 !important; color:#f8fafc !important; }
         [data-baseweb="select"] * { color:#f8fafc !important; -webkit-text-fill-color:#f8fafc !important; }
         [role="listbox"] { background:#111827 !important; color:#f8fafc !important; min-width:520px !important; width:max-content !important; max-width:90vw !important; }
         [role="option"] { background:#111827 !important; color:#f8fafc !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; min-height:42px !important; line-height:1.35 !important; padding:8px 12px !important; }
         [role="option"]:hover { background:#1e3a5f !important; }
-        aside[data-testid="stSidebar"] [data-baseweb="select"] { min-width:100% !important; }
-        aside[data-testid="stSidebar"] [data-baseweb="select"] > div { min-width:100% !important; }
-        div[data-testid="stDownloadButton"] > button { background:#0f766e !important; color:#ffffff !important; border:1px solid #115e59 !important; min-height:44px !important; }
-        aside[data-testid="stSidebar"] { background:#111827 !important; }
         .gemini-rating-row { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:5px; cursor:help; }
         .gemini-rating-row:hover { background:#1e293b; }
         .gemini-rating-label { min-width:145px; color:#e5e7eb; font-size:0.88rem; }
         .gemini-rating-stars { color:#fbbf24; letter-spacing:1px; font-size:1rem; }
         .gemini-rating-help { color:#94a3b8; font-size:0.78rem; }
+        /* Phase 2: Stats banner styling */
+        .stats-banner { background:#1e293b !important; border:1px solid #475569 !important; border-radius:10px !important; padding:12px 16px !important; margin:12px 0 !important; display:flex !important; flex-wrap:wrap !important; gap:16px !important; align-items:center !important; }
+        .stats-banner .stats-label { color:#94a3b8 !important; font-size:14px !important; }
+        .stats-banner .stats-badge { background:#dc2626 !important; color:#fff !important; padding:3px 10px !important; border-radius:999px !important; font-size:13px !important; font-weight:700 !important; }
+        .stats-banner .stats-value { color:#cbd5e1 !important; font-size:14px !important; }
+        /* Phase 2: Keyboard shortcuts section */
+        .shortcut-item { display:flex; align-items:center; gap:8px; padding:3px 0; font-size:13px; color:#cbd5e1; }
+        .shortcut-key { background:#334155 !important; border:1px solid #475569 !important; border-radius:5px !important; padding:2px 8px !important; font-family:'Segoe UI',monospace !important; font-size:12px !important; color:#f8fafc !important; white-space:nowrap !important; }
         @media (max-width: 700px) {
             :root { --panel-height: min(62vh, 620px); }
             .block-container { padding-left:1rem; padding-right:1rem; padding-top:2.5rem; }
@@ -1014,8 +1305,102 @@ def inject_css() -> None:
     )
 
 
+def inject_theme_override_css(is_light: bool) -> None:
+    """Inject CSS overrides for light theme and Phase 3 components."""
+    if not is_light:
+        # Add Phase 3 component styles (always needed in dark mode)
+        _phase3_css = """
+        <style>
+        .batch-queue { background:#111827;border:1px solid #334155;border-radius:10px;padding:12px;margin-top:12px; }
+        .batch-file-item { display:flex;align-items:center;justify-content:space-between;padding:6px 10px;margin:4px 0;border-radius:6px;background:#1e293b; }
+        .batch-file-name { color:#f8fafc;font-size:13px;font-weight:500; }
+        .batch-file-status { font-size:12px;padding:2px 8px;border-radius:999px; }
+        .status-pending { background:#334155;color:#94a3b8; }
+        .status-processing { background:#f59e0b20;color:#f59e0b;border:1px solid #f59e0b; }
+        .status-done { background:#22c55e20;color:#22c55e;border:1px solid #22c55e; }
+        .status-error { background:#ef444420;color:#ef4444;border:1px solid #ef4444; }
+        .per-page-confidence { display:flex;flex-wrap:wrap;gap:6px;margin-top:8px; }
+        .page-conf-item { font-size:12px;padding:3px 8px;border-radius:6px;background:#1e293b;border:1px solid #334155;color:#cbd5e1; }
+        .page-conf-high { background:#22c55e20 !important;border-color:#22c55e !important;color:#22c55e !important; }
+        .page-conf-mid { background:#eab30820 !important;border-color:#eab308 !important;color:#eab308 !important; }
+        .page-conf-low { background:#ef444420 !important;border-color:#ef4444 !important;color:#ef4444 !important; }
+        .theme-switch-container { display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px;background:#111827;border-radius:8px; }
+        .theme-switch-label { font-size:13px;color:#94a3b8; }
+        </style>
+        """
+        st.markdown(_phase3_css, unsafe_allow_html=True)
+    else:
+        # Light theme overrides + Phase 3 components
+        _light_css = """
+        <style>
+        .stApp, [data-testid="stAppViewContainer"] { background:#f8fafc !important; color:#1e293b !important; }
+        header[data-testid="stHeader"], [data-testid="stHeader"] { background:#f1f5f9 !important; }
+        .block-container { color:#1e293b !important; }
+        .mypdf-name { color:#1e293b !important; }
+        .ocr-card { background:#ffffff !important; border-color:#e2e8f0 !important; box-shadow:0 8px 24px rgba(0,0,0,.12) !important; }
+        div[data-testid="stFileUploader"] { background:#f8fafc !important; border-color:#94a3b8 !important; }
+        div[data-testid="stFileUploader"] section, div[data-testid="stFileUploader"] section > div { background:#f8fafc !important; color:#1e293b !important; }
+        div[data-testid="stFileUploader"] small, div[data-testid="stFileUploader"] span, div[data-testid="stFileUploader"] label { color:#475569 !important; }
+        div[data-testid="stProgressBar"] > div { background:#e2e8f0 !important; }
+        .pdf-empty { background:#f8fafc;border-color:#cbd5e1;color:#64748b; }
+        .ocr-live-preview { background:#f8fafc;color:#1e293b;border-color:#cbd5e1; }
+        .download-section { background:#ffffff !important; border-color:#e2e8f0 !important; }
+        .batch-queue { background:#ffffff !important; border-color:#e2e8f0 !important; }
+        .batch-file-item { background:#f1f5f9;color:#1e293b; }
+        .batch-file-name { color:#1e293b; }
+        [data-testid="stTextArea"] textarea { background:#ffffff !important; color:#1e293b !important; border-color:#cbd5e1 !important; }
+        [data-baseweb-select], [data-baseweb-select] > div { background:#ffffff !important; border-color:#cbd5e1 !important; color:#1e293b !important; }
+        [role="listbox"] { background:#f8fafc !important; color:#1e293b !important; }
+        [role="option"] { background:#f8fafc !important; color:#1e293b !important; }
+        [role="option"]:hover { background:#e2e8f0 !important; }
+        .shortcut-item { color:#475569; }
+        .shortcut-key { background:#e2e8f0 !important; border-color:#cbd5e1 !important; color:#1e293b !important; }
+        .page-conf-item { background:#f1f5f9 !important;border-color:#cbd5e1 !important;color:#1e293b !important; }
+        .theme-switch-container { background:#f1f5f9; }
+        .theme-switch-label { color:#64748b; }
+        </style>
+        """
+        st.markdown(_light_css, unsafe_allow_html=True)
+
+
 st.set_page_config(page_title="MyOCR PDF — Thai", page_icon="📄", layout="wide")
 inject_css()
+# --- Phase 3: Theme Override CSS ---
+inject_theme_override_css(st.session_state.get("theme_mode", "dark") == "light")
+
+# --- Phase 2: Keyboard Shortcuts JavaScript ---
+_keyboard_js = """
+<script>
+document.addEventListener('keydown', function(e) {
+    // Ctrl+Z = Undo (only when not in an input/textarea)
+    if (e.ctrlKey && e.key === 'z' && !e.shiftKey) {
+        const tag = document.activeElement.tagName.toLowerCase();
+        const isEditable = document.activeElement.isContentEditable;
+        if (tag !== 'input' && tag !== 'textarea' && !isEditable) {
+            e.preventDefault();
+            const btn = document.querySelector('button[data-testid="_hidden_undo_btn"]');
+            if (btn && !btn.disabled) {
+                btn.click();
+            }
+        }
+    }
+    // Ctrl+S = Trigger download area focus
+    if (e.ctrlKey && e.key === 's') {
+        e.preventDefault();
+        const dlBtn = document.querySelector('button[type="submit"], button[data-testid="stDownloadButton"]');
+        if (dlBtn) {
+            dlBtn.closest("form")?.submit();
+        }
+    }
+    // Escape = Stop/Cancel
+    if (e.key === 'Escape') {
+        const stopBtn = document.querySelector('[data-testid="stToolbar"] button[title*="Stop"]');
+        if (stopBtn) stopBtn.click();
+    }
+});
+</script>
+"""
+components.html(_keyboard_js, height=1)
 
 st.markdown(
     '<div class="mypdf-header"><div class="mypdf-icon">PDF</div>'
@@ -1034,7 +1419,39 @@ st.markdown(
 
 with st.sidebar:
     st.header("ตั้งค่าการอ่านเอกสาร")
-    st.caption("ขั้นที่ 1: เลือกเครื่องมืออ่านข้อความจาก PDF")
+    
+    # --- Phase 3: Theme Toggle ---
+    _current_theme = st.session_state.get("theme_mode", "dark")
+    _new_theme = st.radio(
+        "🎨 ธีม",
+        options=["dark", "light"],
+        index=1 if _current_theme == "light" else 0,
+        key="_theme_picker",
+        format_func=lambda v: ("☀️ Light Mode" if v == "light" else "🌙 Dark Mode"),
+        help="สลับธีมสีของแอปพลิเคชัน",
+    )
+    if _new_theme != _current_theme:
+        st.session_state["theme_mode"] = _new_theme
+        st.rerun()
+    
+    # --- Phase 3: Batch Mode Toggle ---
+    st.caption("ขั้นที่ 1: เลือกโหมดการอัปโหลด")
+    batch_mode = st.checkbox(
+        "📁 โหมดBatch (อัปโหลดหลายไฟล์)",
+        value=st.session_state.get("batch_mode", False),
+        key="batch_mode_toggle",
+        help="เปิดใช้งานเพื่ออัปโหลด PDF หลายไฟล์พร้อมกันและ OCR ทีละไฟล์",
+    )
+    if batch_mode != st.session_state.get("batch_mode", False):
+        st.session_state["batch_mode"] = batch_mode
+        if not batch_mode:
+            # Exit batch mode - clear batch state
+            st.session_state["batch_results"] = {}
+            st.session_state["batch_processing_status"] = {}
+            st.session_state["uploaded_files"] = []
+        st.rerun()
+    
+    st.caption("ขั้นที่ 2: เลือกเครื่องมืออ่านข้อความจาก PDF")
     available_engines = available_ocr_engines()
     if not available_engines:
         st.error("ยังไม่พบ OCR engine: ติดตั้ง Tesseract พร้อมภาษาไทย หรือกำหนด TYPHOON_OCR_API_KEY")
@@ -1145,30 +1562,90 @@ with st.sidebar:
             st.caption("ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ระบบจะอ่านเอกสารด้วย OCR ตามปกติ")
         st.caption("รองรับ PDF สูงสุด 50 MB / 100 หน้า")
 
-uploaded = st.file_uploader(
-    "เลือกไฟล์ PDF เพื่อเริ่มต้น",
-    type=["pdf"],
-    accept_multiple_files=False,
-    help="รองรับเฉพาะไฟล์ .pdf เท่านั้น หากมีไฟล์ Word ให้บันทึกเป็น PDF ก่อน",
-)
-uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
-uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
-previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
-if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
-    st.session_state["ocr_text"] = ""
-    st.session_state["ocr_result_editor"] = ""
-    st.session_state.pop("ocr_status", None)
-    st.session_state.pop("docx_bytes", None)
-    st.session_state.pop("docx_result_fingerprint", None)
-    st.session_state.pop("docx_export_mode", None)
-    st.session_state.pop("target_pages_processed", None)
-    st.session_state.pop("ocr_page_cache", None)
-    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
-elif uploaded_fingerprint and not previous_fingerprint:
-    st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+    # --- Phase 2: Keyboard Shortcuts Help ---
+    st.markdown("---")
+    st.markdown("⌨️ <span style='font-weight:700;font-size:14px;'>คีย์ลัด</span>", unsafe_allow_html=True)
+    st.markdown('<div class="shortcut-item"><kbd class="shortcut-key">Ctrl</kbd> + <kbd class="shortcut-key">Z</kbd><span>= ย้อนกลับ</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="shortcut-item"><kbd class="shortcut-key">Ctrl</kbd> + <kbd class="shortcut-key">S</kbd><span>= ดาวน์โหลด</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="shortcut-item"><kbd class="shortcut-key">Esc</kbd><span>= ยกเลิก OCR</span></div>', unsafe_allow_html=True)
+
+    # --- Phase 2: Undo Button ---
+    _has_ocr_result = bool(st.session_state.get("ocr_result_editor", ""))
+    _undo_disabled = not _has_ocr_result or not st.session_state.get("ocr_undo_stack", [])
+    if _has_ocr_result and st.session_state.get("ocr_undo_stack", []):
+        _undo_label = f"↩️ ย้อนกลับ ({len(st.session_state.get('ocr_undo_stack', []))} รายการ)"
+    elif _has_ocr_result:
+        _undo_label = "↩️ ย้อนกลับ (ไม่มีประวัติ)"
+    else:
+        _undo_label = "↩️ ย้อนกลับ"
+    
+    _undo_clicked = st.button(
+        _undo_label,
+        key="_hidden_undo_btn",
+        disabled=_undo_disabled,
+        use_container_width=True,
+    )
+
+
+# --- Phase 2: Handle Undo Action ---
+if "_hidden_undo_btn" in st.session_state and st.session_state.get("_hidden_undo_btn"):
+    _stack = list(st.session_state.get("ocr_undo_stack", []))
+    if _stack:
+        _prev_text = _stack.pop()
+        st.session_state["ocr_redo_stack"] = list(st.session_state.get("ocr_redo_stack", []))
+        st.session_state["ocr_redo_stack"].append(st.session_state.get("ocr_result_editor", ""))
+        st.session_state["ocr_undo_stack"] = _stack
+        st.session_state["ocr_result_editor"] = _prev_text
+        st.session_state["_prev_ocr_editor"] = _prev_text
+        st.rerun()
+
+# --- Phase 3: File Uploader (Single or Batch Mode) ---
+if st.session_state.get("batch_mode", False):
+    # Batch mode: accept multiple files
+    uploaded_files_list = st.file_uploader(
+        "📁 อัปโหลดไฟล์ PDF หลายไฟล์พร้อมกัน",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="รองรับหลายไฟล์ .pdf พร้อมกัน แต่ละไฟล์สูงสุด 50 MB / 100 หน้า",
+    )
+    if uploaded_files_list is not None and len(uploaded_files_list) > 0:
+        st.session_state["uploaded_files"] = list(uploaded_files_list)
+        # Clear previous batch results when files change
+        _file_names = tuple(f.name for f in st.session_state["uploaded_files"])
+        _saved_names = st.session_state.get("_uploaded_file_names", ())
+        if _file_names != _saved_names:
+            st.session_state["batch_results"] = {}
+            st.session_state["batch_processing_status"] = {}
+            st.session_state["_uploaded_file_names"] = _file_names
+else:
+    # Single file mode (existing behavior)
+    uploaded = st.file_uploader(
+        "เลือกไฟล์ PDF เพื่อเริ่มต้น",
+        type=["pdf"],
+        accept_multiple_files=False,
+        help="รองรับเฉพาะไฟล์ .pdf เท่านั้น หากมีไฟล์ Word ให้บันทึกเป็น PDF ก่อน",
+    )
+    uploaded_bytes = uploaded.getvalue() if uploaded is not None else b""
+    uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest() if uploaded_bytes else ""
+    previous_fingerprint = st.session_state.get("ocr_file_fingerprint", "")
+    if uploaded_fingerprint and previous_fingerprint and uploaded_fingerprint != previous_fingerprint:
+        st.session_state["ocr_text"] = ""
+        st.session_state["ocr_result_editor"] = ""
+        st.session_state.pop("ocr_status", None)
+        st.session_state.pop("docx_bytes", None)
+        st.session_state.pop("docx_result_fingerprint", None)
+        st.session_state.pop("docx_export_mode", None)
+        st.session_state.pop("target_pages_processed", None)
+        st.session_state.pop("ocr_page_cache", None)
+        st.session_state["ocr_undo_stack"] = []
+        st.session_state["ocr_redo_stack"] = []
+        st.session_state.pop("_prev_ocr_editor", None)
+        st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
+    elif uploaded_fingerprint and not previous_fingerprint:
+        st.session_state["ocr_file_fingerprint"] = uploaded_fingerprint
 
 total_doc_pages = 0
-if uploaded_bytes:
+if not st.session_state.get("batch_mode", False) and uploaded_bytes:
     try:
         import pymupdf as fitz
     except ImportError:
@@ -1183,6 +1660,92 @@ if uploaded_bytes:
 target_pages_to_process = None
 effective_use_gemini = use_gemini_correction
 effective_engine = engine
+
+# --- Phase 3: Batch Processing Queue ---
+if st.session_state.get("batch_mode", False) and st.session_state.get("uploaded_files"):
+    _bfiles = st.session_state["uploaded_files"]
+    _bresults = st.session_state.get("batch_results", {})
+    _bstatus = st.session_state.get("batch_processing_status", {})
+    
+    st.markdown(
+        f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
+        f'<span style="font-size:18px;font-weight:700;color:#f8fafc;">📁 Batch Processing ({len(_bfiles)} ไฟล์)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    
+    with st.container():
+        st.markdown('<div class="batch-queue">', unsafe_allow_html=True)
+        for _bi, _bf in enumerate(_bfiles):
+            _fs = _bstatus.get(_bi, "pending")
+            _sc = f"status-{_fs}"
+            _sl = {"pending":"⏳ รอ","processing":"🔄 OCR...","done":"✅ เสร็จ","error":"❌ ผิด"}
+            st.markdown(
+                f'<div class="batch-file-item"><span class="batch-file-name">📄 {_bf.name}</span>'
+                f'<span class="batch-file-status {_sc}">{_sl.get(_fs,_fs)}</span></div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Batch action buttons
+    _col_a, _col_b = st.columns(2)
+    with _col_a:
+        if st.button("🔍 OCR ทั้งหมด", type="primary", use_container_width=True, key="_batch_run_all"):
+            st.session_state["_batch_run_requested"] = True
+    with _col_b:
+        if st.button("⬇️ ดาวน์โหลด ZIP ทั้งหมด", use_container_width=True, key="_batch_zip_all"):
+            st.session_state["_batch_zip_requested"] = True
+    
+    # Per-file result tabs
+    if _bresults:
+        _tab_labels = [f"📄 {_f.name}" for _f in _bfiles]
+        _res_tabs = st.tabs(_tab_labels)
+        for _ti, (_fo, _tb) in enumerate(zip(_bfiles, _res_tabs)):
+            with _tb:
+                _fr = _bresults.get(_ti, {})
+                if _fr:
+                    _rt = _fr.get("text", "")
+                    _rc = _fr.get("confidence")
+                    _rl = _fr.get("language")
+                    _rs = _fr.get("status", "done")
+                    if _rs == "error":
+                        st.error(_rt or "OCR ไม่สำเร็จ")
+                    else:
+                        _ek = f"be_{_ti}_{hashlib.md5(_fo.name.encode()).hexdigest()[:8]}"
+                        _et = st.text_area("ผล OCR", value=_rt, height=400, key=_ek)
+                        if _et != _rt:
+                            _bresults[_ti]["text"] = _et
+                            st.session_state["batch_results"] = _bresults
+                        if _rt:
+                            _st2 = calculate_ocr_stats(_et)
+                            _conf = _rc or _calculate_ocr_confidence(_et)
+                            _dl = _rl or _detect_language(_et)
+                            if _st2.get("pages", 0) > 0:
+                                st.markdown(format_stats_banner(_st2, _conf, _dl), unsafe_allow_html=True)
+                            if _conf and _conf.get("per_page"):
+                                st.markdown("**ความแม่นยำแต่ละหน้า:**")
+                                st.markdown('<div class="per-page-confidence">', unsafe_allow_html=True)
+                                for _pp in _conf["per_page"]:
+                                    _cls = "page-conf-high" if _pp["score"]>=85 else ("page-conf-mid" if _pp["score"]>=60 else "page-conf-low")
+                                    st.markdown(f'<span class="page-conf-item {_cls}">หน้า {_pp["page_number"]}: {_pp["score"]}%</span>', unsafe_allow_html=True)
+                                st.markdown('</div>', unsafe_allow_html=True)
+                            _stem = Path(_fo.name).stem
+                            _ef = st.selectbox("ดาวน์โหลด", ["DOCX","TXT","HTML","Markdown"], key=f"bex_{_ti}")
+                            if st.button("⬇️ ดาวน์โหลด", key=f"bd_{_ti}", use_container_width=True):
+                                try:
+                                    if _ef=="DOCX":
+                                        _db=export_pdf_flowing_docx(_et);_dn=f"{_stem}-flowing.docx";_dm="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    elif _ef=="TXT":
+                                        _db=export_txt_file(_et);_dn=f"{_stem}.txt";_dm="text/plain; charset=utf-8"
+                                    elif _ef=="HTML":
+                                        _db=export_html_file(_et,title=f"MyOCR — {_stem}");_dn=f"{_stem}.html";_dm="text/html; charset=utf-8"
+                                    else:
+                                        _db=export_markdown_file(_et,title=f"MyOCR — {_stem}");_dn=f"{_stem}.md";_dm="text/markdown; charset=utf-8"
+                                    st.download_button(f"ดาวน์โหลด {_ef}", data=_db, file_name=_dn, mime=_dm, key=f"bdn_{_ti}_{hashlib.md5(_et.encode()).hexdigest()[:8]}", use_container_width=True, type="primary")
+                                except Exception as _e:
+                                    st.error(f"เกิดข้อผิดพลาด: {_e}")
+                else:
+                    st.caption("ยังไม่ได้เริ่ม OCR สำหรับไฟล์นี้")
 
 if uploaded is not None and total_doc_pages > 0:
     st.markdown("##### ⚙️ ตั้งค่าก่อนเริ่มอ่านเอกสาร (ควบคุมและประหยัด Token)")
@@ -1208,29 +1771,33 @@ if uploaded is not None and total_doc_pages > 0:
 
     with cfg_col2:
         st.markdown(f"**2. เลือกช่วงหน้า (พบทั้งหมด {total_doc_pages} หน้า)**")
-        page_selection_mode = st.radio(
-            "หน้าที่ต้องการอ่าน:",
-            options=["ทุกหน้าในเอกสาร", "ระบุช่วงหน้าเอง (Custom Range)"],
-            index=0,
-            horizontal=True,
-            key="page_selection_mode_radio",
-        )
-        if page_selection_mode == "ระบุช่วงหน้าเอง (Custom Range)":
-            custom_range_str = st.text_input(
-                "ระบุหน้า (เช่น 1-3, 5):",
-                value=f"1-{min(total_doc_pages, 3)}",
-                key="custom_page_range_input",
-                help=f"กรอกหมายเลขหน้าระหว่าง 1 ถึง {total_doc_pages} คั่นด้วยเครื่องหมายจุลภาค (,) หรือยัติภังค์ (-)",
+        if total_doc_pages > 0:
+            page_selection_mode = st.radio(
+                "หน้าที่ต้องการอ่าน:",
+                options=["ทุกหน้าในเอกสาร", "ระบุช่วงหน้าเอง (Custom Range)"],
+                index=0,
+                horizontal=True,
+                key="page_selection_mode_radio",
             )
-            target_pages_to_process = parse_page_range(custom_range_str, total_doc_pages)
-            saved_percent = round((1.0 - len(target_pages_to_process) / total_doc_pages) * 100)
-            if saved_percent > 0:
-                st.caption(f"⚡ จะประมวลผล {len(target_pages_to_process)} จาก {total_doc_pages} หน้า (ประหยัด Token ไปได้ ~{saved_percent}%)")
+            if page_selection_mode == "ระบุช่วงหน้าเอง (Custom Range)":
+                custom_range_str = st.text_input(
+                    "ระบุหน้า (เช่น 1-3, 5):",
+                    value=f"1-{min(total_doc_pages, 3)}",
+                    key="custom_page_range_input",
+                    help=f"กรอกหมายเลขหน้าระหว่าง 1 ถึง {total_doc_pages} คั่นด้วยเครื่องหมายจุลภาค (,) หรือยัติภังค์ (-)",
+                )
+                target_pages_to_process = parse_page_range(custom_range_str, total_doc_pages)
+                saved_percent = round((1.0 - len(target_pages_to_process) / total_doc_pages) * 100)
+                if saved_percent > 0:
+                    st.success(f"✅ จะประมวลผล {len(target_pages_to_process)} จาก {total_doc_pages} หน้า (ประหยัด Token ~{saved_percent}%)")
+                else:
+                    st.caption(f"จะประมวลผลทั้งหมด {len(target_pages_to_process)} หน้า")
             else:
-                st.caption(f"จะประมวลผลทั้งหมด {len(target_pages_to_process)} หน้า")
+                target_pages_to_process = list(range(1, total_doc_pages + 1))
+                st.success(f"✅ จะประมวลผลครบทั้ง {total_doc_pages} หน้า")
         else:
-            target_pages_to_process = list(range(1, total_doc_pages + 1))
-            st.caption(f"จะประมวลผลครบทั้ง {total_doc_pages} หน้า")
+            st.warning("ยังไม่มีเอกสาร — กรุณาอัปโหลดไฟล์ PDF ก่อนเลือกหน้า")
+            target_pages_to_process = []
 
 run = st.button("🔍 เริ่มอ่านเอกสาร", type="primary", use_container_width=True)
 
@@ -1240,6 +1807,7 @@ with preview_column:
     st.caption("เปิดค้างไว้เพื่อเทียบกับผล OCR")
     if uploaded is not None:
         render_pdf_viewer(uploaded_bytes, uploaded.name, height=PDF_VIEWER_HEIGHT)
+        st.caption("💡 ใช้ปุ่ม + / - ด้านบนขวาของ PDF เพื่อซูมเข้า/ออก")
     else:
         st.markdown(
             '<div class="pdf-empty">อัปโหลดไฟล์ PDF เพื่อแสดงตัวอย่างเอกสารที่นี่</div>',
@@ -1250,11 +1818,149 @@ with result_column:
     st.markdown("#### ผล OCR")
     ocr_preview = st.empty()
 
+# --- Phase 3: Batch Processing Execution ---
+if st.session_state.get("_batch_run_requested") and st.session_state.get("batch_mode", False):
+    import time as _btime
+    _bfiles = st.session_state["uploaded_files"]
+    _bresults = {}
+    _bstatus = {}
+    
+    for _idx, _bf in enumerate(_bfiles):
+        _bstatus[_idx] = "processing"
+        st.session_state["batch_processing_status"] = dict(_bstatus)
+        
+        try:
+            _bf_bytes = _bf.getvalue()
+            _bf_name = _bf.name
+            
+            # Use same OCR extraction as single file mode
+            _b_progress = st.progress(0, text=f"กำลัง OCR {_bf_name}...")
+            
+            class _BProgressWrapper:
+                def __init__(self):
+                    self._w = _b_progress
+                def progress(self, value, text="", **kwargs):
+                    self._w.progress(value, text=text, **kwargs)
+            
+            _bpw = _BProgressWrapper()
+            _b_page_cache = {}
+            
+            # Extract OCR text using existing extract_pdf function
+            _b_text, _b_errors, _b_failed = extract_pdf(
+                _bf_bytes, 
+                language, 
+                mode, 
+                psm, 
+                OEM_LSTM_ONLY, 
+                effective_engine if not st.session_state.get("batch_mode") else engine,
+                use_gemini_correction,
+                gemini_model,
+                _bpw,
+                pages_to_process=list(range(1, 101)),
+                page_cache=_b_page_cache,
+            )
+            
+            # Calculate confidence and detect language
+            _b_confidence = _calculate_ocr_confidence(_b_text)
+            _b_lang = _detect_language(_b_text)
+            
+            _bresults[_idx] = {
+                "text": _b_text,
+                "confidence": _b_confidence,
+                "language": _b_lang,
+                "status": "done",
+                "filename": _bf_name,
+            }
+            _bstatus[_idx] = "done"
+            st.session_state["batch_results"] = dict(_bresults)
+            st.session_state["batch_processing_status"] = dict(_bstatus)
+            
+        except Exception as _be:
+            _bresults[_idx] = {
+                "text": f"เกิดข้อผิดพลาด: {type(_be).__name__}: {_be}",
+                "confidence": None,
+                "language": None,
+                "status": "error",
+                "filename": _bf.name,
+            }
+            _bstatus[_idx] = "error"
+            st.session_state["batch_results"] = dict(_bresults)
+            st.session_state["batch_processing_status"] = dict(_bstatus)
+    
+    st.session_state.pop("_batch_run_requested", None)
+    st.rerun()
+
+# --- Phase 3: Batch ZIP Download ---
+if st.session_state.get("_batch_zip_requested") and st.session_state.get("batch_mode", False):
+    import zipfile as _zipfile
+    _zip_buffer = io.BytesIO()
+    _bresults = st.session_state.get("batch_results", {})
+    
+    with _zipfile.ZipFile(_zip_buffer, "w", _zipfile.ZIP_DEFLATED) as _zipf:
+        for _idx, _fr in _bresults.items():
+            if _fr.get("status") == "done" and _fr.get("text"):
+                _stem = Path(_fr.get("filename", f"file_{_idx}")).stem
+                _content = _fr["text"].encode("utf-8")
+                _zipf.writestr(f"{_stem}.txt", _content)
+    
+    _zip_buffer.seek(0)
+    st.download_button(
+        label="⬇️ ดาวน์โหลด ZIP ทั้งหมด",
+        data=_zip_buffer.getvalue(),
+        file_name="myocr_batch_results.zip",
+        mime="application/zip",
+        key="_batch_zip_download_btn",
+        use_container_width=True,
+        type="primary",
+    )
+    
+    st.session_state.pop("_batch_zip_requested", None)
+    st.rerun()
+
 if run:
     if uploaded is None:
         st.warning("กรุณาเลือกไฟล์ PDF ก่อนเริ่ม OCR")
         st.stop()
+    
+    # Track start time for ETA calculation
+    import time as _time
+    ocr_start_time = _time.time()
+    
     progress = st.progress(0, text="กำลังเตรียมไฟล์... (0%)")
+    
+    class _ProgressWithETA:
+        """Wrapper to add ETA to progress updates."""
+        def __init__(self, wrapped, start_ts):
+            self._wrapped = wrapped
+            self._start = start_ts
+            self._last_pages = 0
+        
+        def progress(self, value, text="", **kwargs):
+            now = _time.time()
+            elapsed = now - self._start
+            # Detect pages done from text pattern: "หน้า X เสร็จแล้ว (Y/Z)" or "กำลังเตรียมหน้า"
+            import re as _re
+            m = _re.search(r'\((\d+)/(\d+)\)', text)
+            if m:
+                done = int(m.group(1))
+                total = int(m.group(2))
+                remaining = total - done
+                if done > self._last_pages and done > 0:
+                    elapsed_per_page = elapsed / done
+                    eta_seconds = remaining * elapsed_per_page
+                    if eta_seconds < 60:
+                        eta_text = f"~{int(eta_seconds)} วินาที"
+                    else:
+                        eta_min = int(eta_seconds // 60)
+                        eta_sec = int(eta_seconds % 60)
+                        eta_text = f"~{eta_min} นาที" if eta_sec == 0 else f"~{eta_min} นาที {eta_sec} วิ"
+                    # Append ETA to text
+                    text = f"{text} | ประมาณการอีก {eta_text}"
+                self._last_pages = done
+            # Forward to actual progress widget
+            self._wrapped.progress(value, text=text, **kwargs)
+    
+    eta_progress = _ProgressWithETA(progress, ocr_start_time)
 
     def publish_ocr_preview(current_text: str) -> None:
         if current_text:
@@ -1269,12 +1975,12 @@ if run:
             page_cache.clear()
         text, errors, failed_images = extract_pdf(
             uploaded_bytes, language, mode, psm, oem, effective_engine,
-            effective_use_gemini, gemini_model, progress,
+            effective_use_gemini, gemini_model, eta_progress,
             page_callback=publish_ocr_preview,
             pages_to_process=target_pages_to_process,
             page_cache=page_cache,
         )
-        progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
+        eta_progress.progress(1.0, text="อ่านเอกสารเสร็จสมบูรณ์ (100%)")
         
         st.session_state["ocr_text"] = text
         st.session_state["ocr_result_editor"] = text
@@ -1287,6 +1993,17 @@ if run:
             height=OCR_EDITOR_HEIGHT,
             key="ocr_result_editor"
         )
+        
+        # --- Phase 2: Undo tracking - push to stack when user edits ---
+        _current_val = st.session_state.get("ocr_result_editor", "")
+        _prev_val = st.session_state.get("_prev_ocr_editor", _current_val)
+        if _current_val != _prev_val and _prev_val:
+            _stack = list(st.session_state.get("ocr_undo_stack", []))
+            _stack.append(_prev_val)
+            if len(_stack) > 50:
+                _stack = _stack[-50:]
+            st.session_state["ocr_undo_stack"] = _stack
+        st.session_state["_prev_ocr_editor"] = _current_val
         
         document_errors = [(page_number, error) for page_number, error in errors if page_number is None]
         page_errors = [(page_number, error) for page_number, error in errors if page_number is not None]
@@ -1303,6 +2020,12 @@ if run:
             result_status = "local"
             st.success("อ่านเอกสารสำเร็จด้วย OCR ในเครื่อง (0 Token)")
         st.session_state["ocr_status"] = result_status
+        
+        # --- Phase 2: Calculate and display stats banner ---
+        _ocr_stats = calculate_ocr_stats(st.session_state["ocr_result_editor"])
+        if _ocr_stats["pages"] > 0:
+            ocr_preview.markdown(format_stats_banner(_ocr_stats), unsafe_allow_html=True)
+        
         stem = Path(uploaded.name).stem
         if document_errors:
             with st.expander(f"ปัญหาระดับเอกสาร ({len(document_errors)})"):
@@ -1323,7 +2046,7 @@ if run:
                         )
         failed_images.clear()
     except Exception as exc:
-        progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
+        eta_progress.progress(1.0, text="OCR ไม่สำเร็จ (100%)")
         st.session_state["ocr_text"] = ""
         st.session_state["ocr_result_editor"] = ""
         st.session_state["ocr_status"] = "failed"
@@ -1340,6 +2063,17 @@ if not run:
         height=OCR_EDITOR_HEIGHT,
         key="ocr_result_editor",
     )
+    
+    # --- Phase 2: Undo tracking for normal display block ---
+    _current_val = st.session_state.get("ocr_result_editor", "")
+    _prev_val = st.session_state.get("_prev_ocr_editor", _current_val)
+    if _current_val != _prev_val and _prev_val:
+        _stack = list(st.session_state.get("ocr_undo_stack", []))
+        _stack.append(_prev_val)
+        if len(_stack) > 50:
+            _stack = _stack[-50:]
+        st.session_state["ocr_undo_stack"] = _stack
+    st.session_state["_prev_ocr_editor"] = _current_val
 
 if (
     uploaded is not None
@@ -1347,57 +2081,99 @@ if (
     and (st.session_state.get("ocr_text") or st.session_state.get("ocr_result_editor"))
 ):
     st.markdown("---")
-    st.markdown("### 📥 ดาวน์โหลดผลลัพธ์ (DOCX)")
+    st.markdown("### 📥 ดาวน์โหลดผลลัพธ์")
 
     current_ocr_text = st.session_state.get("ocr_result_editor") or st.session_state.get("ocr_text", "")
     stem = Path(uploaded.name).stem
 
-    col_mode, col_btn = st.columns([3, 2], gap="medium")
-    with col_mode:
-        selected_mode = st.radio(
-            "เลือกรูปแบบไฟล์ DOCX:",
-            options=[
-                "📄 จัดรูปเล่มอัตโนมัติ (Flowing — สระไม่ตก ไม่ตัด สวยงาม แนะนำสำหรับภาษาไทย)",
-                "📐 จัดวางตามพิกัดหน้าเดิม (Layered Layout — วางกล่องข้อความตามพิกัด PDF)",
-            ],
+    # --- Phase 2: Format Selector ---
+    col_format, col_mode = st.columns([2, 3], gap="medium")
+    with col_format:
+        export_format = st.selectbox(
+            "รูปแบบไฟล์:",
+            options=["DOCX (Word)", "TXT (Plain Text)", "HTML", "Markdown"],
             index=0,
-            key="docx_download_mode_radio",
-            help="สามารถแก้ไขข้อความในกล่อง 'ผล OCR' ด้านบน แล้วดาวน์โหลดตามข้อความที่แก้ไขได้ทันที",
+            key="export_format_select",
         )
-
-    with col_btn:
+    
+    with col_mode:
+        if export_format == "DOCX (Word)":
+            selected_mode = st.radio(
+                "โหมด DOCX:",
+                options=[
+                    "📄 จัดรูปเล่มอัตโนมัติ (Flowing — สระไม่ตก ไม่ตัด สวยงาม แนะนำสำหรับภาษาไทย)",
+                    "📐 จัดวางตามพิกัดหน้าเดิม (Layered Layout — วางกล่องข้อความตามพิกัด PDF)",
+                ],
+                index=0,
+                key="docx_download_mode_radio",
+                help="สามารถแก้ไขข้อความในกล่อง 'ผล OCR' ด้านบน แล้วดาวน์โหลดตามข้อความที่แก้ไขได้ทันที",
+            )
+    
+    # --- Phase 2: Multi-format Download Generation ---
+    _download_col = st.empty()
+    with _download_col.container():
         st.write("")
-        st.write("")
-        target_docx_bytes = None
+        target_bytes = None
         target_filename = ""
+        target_mime = ""
         target_help = ""
-
-        with st.spinner("กำลังเตรียมไฟล์ DOCX..."):
-            try:
+        
+        try:
+            if export_format == "DOCX (Word)":
+                # Ensure selected_mode is defined when in DOCX mode
+                if "selected_mode" not in locals():
+                    selected_mode = "📄"  # default to flowing
                 if selected_mode.startswith("📄"):
-                    target_docx_bytes = export_pdf_flowing_docx(current_ocr_text)
+                    target_bytes = export_pdf_flowing_docx(current_ocr_text)
                     target_filename = f"{stem}-flowing.docx"
+                    target_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     target_help = "ไฟล์ Word จัดรูปเล่มอัตโนมัติ ใช้ฟอนต์ TH Sarabun New สระและวรรณยุกต์ครบถ้วน ไม่มั่ว แก้ไขง่าย"
                 else:
                     processed_pages = st.session_state.get("target_pages_processed")
-                    target_docx_bytes, report = export_pdf_editable_docx(
+                    target_bytes, report = export_pdf_editable_docx(
                         uploaded_bytes,
                         current_ocr_text,
                         page_numbers=tuple(processed_pages) if processed_pages else None,
                     )
                     target_filename = f"{stem}-layered.docx"
+                    target_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     target_help = "ไฟล์ Word อิงพิกัดเดิม มีภาพพื้นหลังและกล่องข้อความลอยตามตำแหน่งเดิม"
-            except Exception as export_err:
-                st.error(f"เกิดข้อผิดพลาดในการสร้าง DOCX: {type(export_err).__name__}: {export_err}")
-
-        if target_docx_bytes:
+            
+            elif export_format == "TXT (Plain Text)":
+                target_bytes = export_txt_file(current_ocr_text)
+                target_filename = f"{stem}.txt"
+                target_mime = "text/plain; charset=utf-8"
+                target_help = "ไฟล์ข้อความธรรมดา เปิดได้กับทุกโปรแกรมแก้ไขข้อความ"
+            
+            elif export_format == "HTML":
+                target_bytes = export_html_file(current_ocr_text, title=f"MyOCR PDF — {stem}")
+                target_filename = f"{stem}.html"
+                target_mime = "text/html; charset=utf-8"
+                target_help = "ไฟล์ HTML พร้อมรูปแบบพื้นฐาน เปิดในเบราว์เซอร์ได้ทันที"
+            
+            elif export_format == "Markdown":
+                target_bytes = export_markdown_file(current_ocr_text, title=f"MyOCR PDF — {stem}")
+                target_filename = f"{stem}.md"
+                target_mime = "text/markdown; charset=utf-8"
+                target_help = "ไฟล์ Markdown พร้อม header พื้นฐาน ใช้กับ Notion, GitHub ได้"
+        
+        except Exception as export_err:
+            st.error(f"เกิดข้อผิดพลาดในการสร้างไฟล์: {type(export_err).__name__}: {export_err}")
+        
+        if target_bytes:
+            format_labels = {
+                "DOCX (Word)": "⬇️ ดาวน์โหลด DOCX",
+                "TXT (Plain Text)": "⬇️ ดาวน์โหลด TXT",
+                "HTML": "⬇️ ดาวน์โหลด HTML",
+                "Markdown": "⬇️ ดาวน์โหลด Markdown",
+            }
             st.download_button(
-                "⬇️ ดาวน์โหลดไฟล์ DOCX",
-                data=target_docx_bytes,
+                label=format_labels.get(export_format, "⬇️ ดาวน์โหลด"),
+                data=target_bytes,
                 file_name=target_filename,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                mime=target_mime,
                 help=target_help,
                 use_container_width=True,
                 type="primary",
             )
-            st.caption(f"ขนาดไฟล์: {len(target_docx_bytes) / 1024:.1f} KB (อัปเดตตามข้อความล่าสุด)")
+            st.caption(f"ขนาดไฟล์: {len(target_bytes) / 1024:.1f} KB (อัปเดตตามข้อความล่าสุด)")
