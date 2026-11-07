@@ -34,8 +34,8 @@
 - [x] Batch Processing UI (multi-file upload, per-file tabs)
 - [x] Batch Processing Execution (sequential OCR)
 - [x] ZIP download for all batch results
-- [x] Post-Launch Fix: "จะประมวลผลครบทั้ง X หน้า" changed to subtle caption
-- [x] Post-Launch Fix: Balanced PDF viewer and OCR editor heights via CSS
+- [x] Post-Launch Fix 1: "จะประมวลผลครบทั้ง X หน้า" changed to subtle caption
+- [x] Post-Launch Fix 2: Restored two-column layout + restricted CSS height override to OCR editor only
 - [ ] Google Drive Export (deferred — OAuth complexity)
 
 ## Current Status

@@ -27,6 +27,7 @@ Phase 3: Advanced Features — COMPLETED ✅ + Post-Launch UI Fixes Applied 🚀
 - [x] Batch Processing UI: File uploader switches to `accept_multiple_files=True` when batch mode enabled. Shows batch queue with per-file status badges (pending/processing/done/error). Per-file result tabs with OCR text editor, confidence display, and individual download buttons.
 - [x] Batch Processing Execution: `_batch_run_requested` triggers sequential OCR on all uploaded files. Results stored in `batch_results` session state with confidence and language detection. ZIP download support for all results.
 - [x] Post-Launch Fixes (11/7/2026): Fixed "จะประมวลผลครบทั้ง X หน้า" from st.success() to st.caption() for subtlety; balanced PDF viewer and OCR editor heights via CSS `--panel-height` override.
+- [x] Post-Launch Fix 2 (11/7/2026): Restored two-column layout by restricting CSS height override to only OCR result textarea using `[aria-label="ผล OCR"]` selector. Removed `height:var(--panel-height)` from `.pdf-empty` class.
 - [x] CSS Additions: `.batch-queue`, `.batch-file-item`, `.batch-file-status`, `.status-*`, `.per-page-confidence`, `.page-conf-*`, `.theme-switch-container` styles.
 
 ## Files Modified
@@ -40,12 +41,14 @@ Phase 3: Advanced Features — COMPLETED ✅ + Post-Launch UI Fixes Applied 🚀
   - Lines 1679-1763: Added Batch Processing Queue UI with per-file tabs, stats, confidence display
   - Lines 1836-1933: Added Batch Processing Execution logic and ZIP download handler
   - Line 1797: Changed "จะประมวลผลครบทั้ง X หน้า" from `st.success()` to `st.caption()` for subtlety
-  - Lines 1268-1269: Added CSS height override to balance PDF viewer and OCR editor heights
+  - Lines 1266-1269: CSS height override for OCR editor balance (refined with [aria-label] selector)
   - Lines 1990-1994: Wrapped OCR text area in container with adjusted height
 
 ### Recent Commits
+- `085f1ab` — Fix: Restore two-column layout + restrict height CSS to OCR editor only (post-launch fix 2)
 - `8389341` — Fix: Balance OCR editor height + subtle page count notice (post-launch)
 - `39b72a9` — Fix: Stats banner showing raw HTML in single file mode
+- `69ee02c` — Update memory bank: Phase 3 completed + post-launch UI fixes
 - `675d00c` — Phase 3: Advanced Features (batch, confidence, theme toggle, language detection)
 
 ## Known Issues
@@ -54,5 +57,3 @@ Phase 3: Advanced Features — COMPLETED ✅ + Post-Launch UI Fixes Applied 🚀
 - _prev_ocr_editor tracking may accumulate redundant entries on rapid edits (FIFO limit of 50 mitigates this)
 - Theme toggle works via CSS injection override — Streamlit native theming still uses dark config
 - Batch processing runs sequentially (not parallel) due to Streamlit rerun model limitations
-- "จะประมวลผลครบทั้ง X หน้า" แสดง success box ใหญ่เกินไป → เปลี่ยนเป็น caption แล้ว
-- PDF viewer และ OCR editor ไม่เท่ากัน → แก้ด้วย CSS height override
