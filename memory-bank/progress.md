@@ -25,7 +25,7 @@
 - [x] PDF viewer zoom note caption
 - [x] CSS additions for stats banner and shortcut items
 
-## Phase 3 Advanced Features — IN PROGRESS 🚧
+## Phase 3 Advanced Features — COMPLETED ✅ (with post-launch fixes)
 - [x] OCR Confidence Score (0-100% with colored badges)
 - [x] Per-page confidence breakdown display
 - [x] Auto Language Detection (Thai/English/Mixed)
@@ -34,10 +34,12 @@
 - [x] Batch Processing UI (multi-file upload, per-file tabs)
 - [x] Batch Processing Execution (sequential OCR)
 - [x] ZIP download for all batch results
+- [x] Post-Launch Fix: "จะประมวลผลครบทั้ง X หน้า" changed to subtle caption
+- [x] Post-Launch Fix: Balanced PDF viewer and OCR editor heights via CSS
 - [ ] Google Drive Export (deferred — OAuth complexity)
 
 ## Current Status
-Phase 1 & 2 completed. Phase 3 core features implemented and code compiles successfully. Ready for user testing.
+Phase 1 & 2 completed. Phase 3 core features implemented + post-launch UI fixes applied. Code compiles successfully, deployed to Render. Ready for user testing.
 
 ## Known Issues
 - Redo functionality tracked in `ocr_redo_stack` but not yet exposed as UI element (planned for Phase 4)

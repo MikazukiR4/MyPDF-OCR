@@ -1,7 +1,7 @@
 # Active Context — MyOCR PDF
 
 ## Current Focus (11/7/2026)
-Phase 3: Advanced Features — IN PROGRESS 🚧
+Phase 3: Advanced Features — COMPLETED ✅ + Post-Launch UI Fixes Applied 🚀
 
 ## Completed Changes
 
@@ -26,10 +26,11 @@ Phase 3: Advanced Features — IN PROGRESS 🚧
 - [x] Theme Toggle: Radio buttons in sidebar for dark/light mode toggle. Light theme CSS injected via `inject_theme_override_css()` function. Session state persisted in `theme_mode`.
 - [x] Batch Processing UI: File uploader switches to `accept_multiple_files=True` when batch mode enabled. Shows batch queue with per-file status badges (pending/processing/done/error). Per-file result tabs with OCR text editor, confidence display, and individual download buttons.
 - [x] Batch Processing Execution: `_batch_run_requested` triggers sequential OCR on all uploaded files. Results stored in `batch_results` session state with confidence and language detection. ZIP download support for all results.
+- [x] Post-Launch Fixes (11/7/2026): Fixed "จะประมวลผลครบทั้ง X หน้า" from st.success() to st.caption() for subtlety; balanced PDF viewer and OCR editor heights via CSS `--panel-height` override.
 - [x] CSS Additions: `.batch-queue`, `.batch-file-item`, `.batch-file-status`, `.status-*`, `.per-page-confidence`, `.page-conf-*`, `.theme-switch-container` styles.
 
 ## Files Modified
-- app.py (~1930 lines, was ~1575 after Phase 2):
+- app.py (~2,030 lines, was ~1,575 after Phase 2):
   - Lines 50-67: Added batch processing, theme toggle, and language detection session state
   - Lines 259-433: Added `_calculate_ocr_confidence()`, `_detect_language()`, updated `format_stats_banner()` with confidence/lang support
   - Lines 1323-1380: Added `inject_theme_override_css()` for light theme + Phase 3 component CSS
@@ -38,6 +39,14 @@ Phase 3: Advanced Features — IN PROGRESS 🚧
   - Lines 1617-1663: Modified file uploader to support both single-file and batch mode
   - Lines 1679-1763: Added Batch Processing Queue UI with per-file tabs, stats, confidence display
   - Lines 1836-1933: Added Batch Processing Execution logic and ZIP download handler
+  - Line 1797: Changed "จะประมวลผลครบทั้ง X หน้า" from `st.success()` to `st.caption()` for subtlety
+  - Lines 1268-1269: Added CSS height override to balance PDF viewer and OCR editor heights
+  - Lines 1990-1994: Wrapped OCR text area in container with adjusted height
+
+### Recent Commits
+- `8389341` — Fix: Balance OCR editor height + subtle page count notice (post-launch)
+- `39b72a9` — Fix: Stats banner showing raw HTML in single file mode
+- `675d00c` — Phase 3: Advanced Features (batch, confidence, theme toggle, language detection)
 
 ## Known Issues
 - Undo button uses session state key polling (_hidden_undo_btn) — works within Streamlit constraints but not ideal
@@ -45,3 +54,5 @@ Phase 3: Advanced Features — IN PROGRESS 🚧
 - _prev_ocr_editor tracking may accumulate redundant entries on rapid edits (FIFO limit of 50 mitigates this)
 - Theme toggle works via CSS injection override — Streamlit native theming still uses dark config
 - Batch processing runs sequentially (not parallel) due to Streamlit rerun model limitations
+- "จะประมวลผลครบทั้ง X หน้า" แสดง success box ใหญ่เกินไป → เปลี่ยนเป็น caption แล้ว
+- PDF viewer และ OCR editor ไม่เท่ากัน → แก้ด้วย CSS height override
